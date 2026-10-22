@@ -1,0 +1,823 @@
+# =========================================================================
+#   Ceedling - Test-Centered Build System for C
+#   ThrowTheSwitch.org
+#   Copyright (c) 2010-26 Mike Karlesky, Mark VanderVoord, & Greg Williams
+#   SPDX-License-Identifier: MIT
+# =========================================================================
+
+require 'spec_helper'
+require 'strscan'
+require 'ceedling/c_extractor/c_extractor_code_text'
+require 'ceedling/c_extractor/c_extractor_preprocessing'
+
+describe CExtractorPreprocessing do
+
+  before(:each) do
+    code_text      = CExtractorCodeText.new
+    @preprocessing = described_class.new( { c_extractor_code_text: code_text } )
+  end
+
+  # Helper: scan `text` for FOO and BAR macro calls
+  def scan(text, names = ['FOO', 'BAR'])
+    @preprocessing.try_extract_macro_calls( StringScanner.new(text), names )
+  end
+
+  context "#try_extract_macro_calls" do
+
+    it "returns empty array for empty input" do
+      expect( scan('') ).to eq []
+    end
+
+    it "returns empty array when no matching macros are present" do
+      expect( scan('int x = UNRELATED(42);') ).to eq []
+    end
+
+    # A requested name is only a match when its open parenthesis follows. So a name
+    # that is a strict prefix of a longer identifier cannot claim that identifier's
+    # call, and two requested names where one extends the other stay distinct
+    # whichever order they are given in.
+    it "does not match a requested name against a longer identifier that merely starts with it" do
+      expect( scan('FOO_EXTENDED(a)') ).to eq []
+    end
+
+    it "keeps a name and its own extension distinct, shorter name requested first" do
+      expect( scan('FOO(a)',          ['FOO', 'FOO_AT']) ).to eq ['FOO(a)']
+      expect( scan('FOO_AT(d, a)',    ['FOO', 'FOO_AT']) ).to eq ['FOO_AT(d, a)']
+    end
+
+    # --- Basic single-macro extraction ---
+
+    it "extracts a single-param macro call" do
+      expect( scan('FOO(bar)') ).to eq ['FOO(bar)']
+    end
+
+    it "extracts a multi-param macro call" do
+      expect( scan('FOO(a, b, c)') ).to eq ['FOO(a, b, c)']
+    end
+
+    it "extracts macros from both names in the list" do
+      expect( scan('FOO(x) BAR(y)') ).to eq ['FOO(x)', 'BAR(y)']
+    end
+
+    it "extracts multiple calls of the same macro in order" do
+      expect( scan('FOO(a) FOO(b)') ).to eq ['FOO(a)', 'FOO(b)']
+    end
+
+    it "extracts macro surrounded by unrelated C code" do
+      input = "int x = 1;\nFOO(calc)\nvoid f(void) {}"
+      expect( scan(input) ).to eq ['FOO(calc)']
+    end
+
+    # --- Whitespace normalisation ---
+
+    it "collapses embedded newlines in a multiline macro call" do
+      input = "FOO(a,\n  b,\n  c)"
+      expect( scan(input) ).to eq ['FOO(a, b, c)']
+    end
+
+    it "collapses tabs and multiple spaces" do
+      expect( scan("FOO(\t\ta\t\t)") ).to eq ['FOO( a )']
+    end
+
+    # --- Comment suppression (outer scan) ---
+
+    it "does not extract a macro call inside a line comment" do
+      input = "// FOO(ignored)\nBAR(found)"
+      expect( scan(input) ).to eq ['BAR(found)']
+    end
+
+    it "does not extract a macro call inside a block comment" do
+      input = "/* FOO(ignored) */ BAR(found)"
+      expect( scan(input) ).to eq ['BAR(found)']
+    end
+
+    it "does not extract any macros when all input is inside a block comment" do
+      expect( scan('/* FOO(a) BAR(b) */') ).to eq []
+    end
+
+    it "resumes extraction after a block comment ends" do
+      input = "/* FOO(skip) */ FOO(keep)"
+      expect( scan(input) ).to eq ['FOO(keep)']
+    end
+
+    # --- String literal suppression (outer scan) ---
+
+    it "does not extract a macro name appearing inside a double-quoted string literal" do
+      input = 'const char *s = "FOO(not_a_call)"; BAR(real)'
+      expect( scan(input) ).to eq ['BAR(real)']
+    end
+
+    it "does not extract a macro name appearing inside a single-quoted char literal" do
+      # 'F' followed immediately by OO(... — the single char literal ends after 'F'
+      # so this test uses a longer string that resembles a macro name in char context
+      input = "char c = 'x'; FOO(real)"
+      expect( scan(input) ).to eq ['FOO(real)']
+    end
+
+    # --- String literals as macro parameters ---
+
+    it "treats a string literal containing a comma as a single argument" do
+      input = 'FOO("hello, world")'
+      expect( scan(input) ).to eq ['FOO("hello, world")']
+    end
+
+    it "treats a string literal containing parentheses as a single argument" do
+      input = 'FOO("f(x)")'
+      expect( scan(input) ).to eq ['FOO("f(x)")']
+    end
+
+    it "treats a string literal containing a macro name as a single argument" do
+      input = 'FOO("FOO(inner)")'
+      expect( scan(input) ).to eq ['FOO("FOO(inner)")']
+    end
+
+    it "handles a string literal containing an escaped quote" do
+      input = 'FOO("say \\"hi\\"")'
+      expect( scan(input) ).to eq ['FOO("say \\"hi\\"")']
+    end
+
+    it "extracts a macro whose arguments mix string literals and plain args" do
+      input = 'FOO(calc, "a,b", second)'
+      expect( scan(input) ).to eq ['FOO(calc, "a,b", second)']
+    end
+
+    # --- Comments inside argument lists ---
+
+    it "removes a block comment inside an argument list and collapses to space" do
+      input = "FOO(a /* ignored */, b)"
+      expect( scan(input) ).to eq ['FOO(a , b)']
+    end
+
+    it "removes a line comment inside an argument list" do
+      input = "FOO(a, // comment\nb)"
+      expect( scan(input) ).to eq ['FOO(a, b)']
+    end
+
+    # --- Nested parentheses ---
+
+    it "handles nested parentheses in arguments" do
+      input = 'FOO(func(x, y), z)'
+      expect( scan(input) ).to eq ['FOO(func(x, y), z)']
+    end
+
+    it "handles multiply-nested parentheses" do
+      input = 'FOO(f(g(h(1))))'
+      expect( scan(input) ).to eq ['FOO(f(g(h(1))))']
+    end
+
+    # --- Mixed complexity ---
+
+    it "handles a mix of string literals, comments, and nested parens in one call" do
+      input = 'FOO("str(with,parens)", func(/* note */ x), y)'
+      expect( scan(input) ).to eq ['FOO("str(with,parens)", func( x), y)']
+    end
+
+    # --- Malformed / edge cases ---
+
+    it "returns empty array for an unbalanced macro call" do
+      expect( scan('FOO(unbalanced') ).to eq []
+    end
+
+    it "does not confuse a word that ends with a macro name suffix" do
+      # 'NOTFOO(x)' should not match 'FOO' due to word boundary
+      expect( scan('NOTFOO(x)') ).to eq []
+    end
+
+  end
+
+  context "#parse_macro_call" do
+
+    def parse(str)
+      @preprocessing.parse_macro_call(str)
+    end
+
+    it "returns macro name and single param" do
+      expect( parse('FOO(bar)') ).to eq ['FOO', ['bar']]
+    end
+
+    it "returns macro name and multiple comma-separated params" do
+      expect( parse('FOO(a, b, c)') ).to eq ['FOO', ['a', 'b', 'c']]
+    end
+
+    it "returns macro name and empty params array when no arguments" do
+      expect( parse('FOO()') ).to eq ['FOO', []]
+    end
+
+    it "trims leading and trailing whitespace from each param" do
+      expect( parse('FOO(  a  ,  b  )') ).to eq ['FOO', ['a', 'b']]
+    end
+
+    it "treats nested parens as a single param unit — inner comma is not a separator" do
+      expect( parse('FOO(func(x, y), z)') ).to eq ['FOO', ['func(x, y)', 'z']]
+    end
+
+    it "treats square brackets as a single param unit — inner comma is not a separator" do
+      expect( parse('FOO(calc, [add, subtract])') ).to eq ['FOO', ['calc', '[add, subtract]']]
+    end
+
+    it "treats curly braces as a single param unit — inner comma is not a separator" do
+      expect( parse('FOO(name, {a, b})') ).to eq ['FOO', ['name', '{a, b}']]
+    end
+
+    it "treats a string literal as a single param unit — inner comma is not a separator" do
+      expect( parse('FOO("hello, world")') ).to eq ['FOO', ['"hello, world"']]
+    end
+
+    it "handles a mix of string literals, brackets, and nested parens" do
+      expect( parse('TEST_PARTIAL_CONFIG(calculator, test_public, [add, subtract])') ).to eq [
+        'TEST_PARTIAL_CONFIG', ['calculator', 'test_public', '[add, subtract]']
+      ]
+    end
+
+    it "returns [nil, []] for malformed input with no opening paren" do
+      expect( parse('FOO_no_parens') ).to eq [nil, []]
+    end
+
+    it "returns [nil, []] for empty input" do
+      expect( parse('') ).to eq [nil, []]
+    end
+
+  end
+
+  context "#try_extract_directive" do
+
+    def try_directive(text)
+      scanner = StringScanner.new(text)
+      result  = @preprocessing.try_extract_directive(scanner)
+      [result, scanner.pos]
+    end
+
+    it "returns [false, nil] when scanner is not at #" do
+      result, pos = try_directive('int x = 0;')
+      expect(result).to eq [false, nil]
+      expect(pos).to eq 0  # scanner not advanced
+    end
+
+    it "returns [false, nil] for empty input" do
+      result, pos = try_directive('')
+      expect(result).to eq [false, nil]
+      expect(pos).to eq 0
+    end
+
+    it "extracts a simple #pragma directive" do
+      result, pos = try_directive("#pragma once\n")
+      expect(result).to eq [true, "#pragma once"]
+      expect(pos).to eq "#pragma once\n".length
+    end
+
+    it "extracts a simple #include directive" do
+      result, pos = try_directive("#include <stdio.h>\n")
+      expect(result).to eq [true, "#include <stdio.h>"]
+      expect(pos).to eq "#include <stdio.h>\n".length
+    end
+
+    it "extracts a simple single-line #define macro" do
+      result, pos = try_directive("#define FOO 42\n")
+      expect(result).to eq [true, "#define FOO 42"]
+      expect(pos).to eq "#define FOO 42\n".length
+    end
+
+    it "extracts a #define with whitespace after #" do
+      result, pos = try_directive("# define FOO\n")
+      expect(result).to eq [true, "# define FOO"]
+      expect(pos).to eq "# define FOO\n".length
+    end
+
+    it "extracts a directive without trailing newline (EOS)" do
+      result, pos = try_directive("#define FOO")
+      expect(result).to eq [true, "#define FOO"]
+      expect(pos).to eq "#define FOO".length
+    end
+
+    it "extracts a multiline #define with single backslash continuation" do
+      input = "#define MAX(a,b) \\\n  ((a)>(b)?(a):(b))\n"
+      result, pos = try_directive(input)
+      expect(result).to eq [true, input.rstrip]
+      expect(pos).to eq input.length
+    end
+
+    it "extracts a multiline #define with multiple backslash continuations" do
+      input = "#define MULTI \\\n  line1 \\\n  line2\n"
+      result, pos = try_directive(input)
+      expect(result).to eq [true, input.rstrip]
+      expect(pos).to eq input.length
+    end
+
+    # --- Regression: GH #1184 — escape sequences inside a #define string literal ---
+    # A lone '\' preceding a string-literal escape (e.g. \n, \", \\) is not a line
+    # continuation and must not be mistaken for one, truncating the directive.
+
+    it "extracts a #define whose string literal contains an escaped newline" do
+      input = "#define SZ1 sizeof(\"\\n\")\n"
+      result, pos = try_directive(input)
+      expect(result).to eq [true, input.rstrip]
+      expect(pos).to eq input.length
+    end
+
+    it "extracts a #define whose string literal contains an escaped quote" do
+      input = "#define MSG \"say \\\"hi\\\"\"\n"
+      result, pos = try_directive(input)
+      expect(result).to eq [true, input.rstrip]
+      expect(pos).to eq input.length
+    end
+
+    it "extracts a #define whose string literal contains an escaped backslash" do
+      input = "#define PATH \"C:\\\\dir\"\n"
+      result, pos = try_directive(input)
+      expect(result).to eq [true, input.rstrip]
+      expect(pos).to eq input.length
+    end
+
+    it "extracts a #define with an escaped character and no trailing newline (EOS)" do
+      input = "#define SZ1 sizeof(\"\\n\")"
+      result, pos = try_directive(input)
+      expect(result).to eq [true, input]
+      expect(pos).to eq input.length
+    end
+
+    it "does not consume a following function definition after a #define with an escaped character" do
+      input = "#define SZ1 sizeof(\"\\n\")\nvoid helloWorld() { return; }\n"
+      result, pos = try_directive(input)
+      expect(result).to eq [true, "#define SZ1 sizeof(\"\\n\")"]
+      expect(pos).to eq "#define SZ1 sizeof(\"\\n\")\n".length
+    end
+
+    it "stops at end of directive and does not consume following code" do
+      input = "#define FOO 1\nint x = 0;"
+      result, pos = try_directive(input)
+      expect(result).to eq [true, "#define FOO 1"]
+      expect(pos).to eq "#define FOO 1\n".length
+    end
+
+    # --- Regression: GH #1262 — a trailing // comment's apostrophe/quote merges
+    # the next directive into this one ---
+    # A '\'' or '"' inside an ordinary // comment (e.g. an English contraction
+    # like "don't") is not a string/char literal delimiter. Scanned as one
+    # anyway, it sends skip_c_string hunting for a closing match straight through
+    # this directive's own newline and into whatever follows, silently merging
+    # the next #define's text (and losing the newline between them) into this one.
+
+    it "extracts a #define with a trailing // comment containing an apostrophe" do
+      input = "#define START_ADDRESS 0x00 // don't change this\n"
+      result, pos = try_directive(input)
+      expect(result).to eq [true, input.rstrip]
+      expect(pos).to eq input.length
+    end
+
+    it "does not consume a following #define after a // comment containing an apostrophe" do
+      input = "#define START_ADDRESS 0x00 // don't change this\n#define IDX 1\n"
+      result, pos = try_directive(input)
+      expect(result).to eq [true, "#define START_ADDRESS 0x00 // don't change this"]
+      expect(pos).to eq "#define START_ADDRESS 0x00 // don't change this\n".length
+    end
+
+    it "does not consume a following #define after a // comment containing a double quote" do
+      input = %(#define LABEL "unbalanced) + %( quote in a comment: "\n#define IDX 1\n)
+      result, pos = try_directive(input)
+      expect(result[0]).to eq true
+      expect(result[1]).to start_with('#define LABEL')
+      expect(pos).to be < input.length
+      expect(input[pos..]).to eq "#define IDX 1\n"
+    end
+
+    it "extracts a #define with a trailing /* */ comment containing an apostrophe" do
+      input = "#define START_ADDRESS 0x00 /* don't change this */\n"
+      result, pos = try_directive(input)
+      expect(result).to eq [true, input.rstrip]
+      expect(pos).to eq input.length
+    end
+
+    it "carries a directive across physical lines when a // comment's own line ends in a backslash" do
+      input = "#define MACRO(x) \\\n  // comment continues \\\n  do_thing(x);\n"
+      result, pos = try_directive(input)
+      expect(result).to eq [true, input.rstrip]
+      expect(pos).to eq input.length
+    end
+
+    it "leaves scanner position unchanged on failure" do
+      scanner = StringScanner.new("int x;")
+      scanner.pos = 0
+      @preprocessing.try_extract_directive(scanner)
+      expect(scanner.pos).to eq 0
+    end
+
+    it "preserves a lone '/' that isn't part of a comment or operator" do
+      input = "#define RATIO (1/2)\n"
+      result, pos = try_directive(input)
+      expect(result).to eq [true, input.rstrip]
+      expect(pos).to eq input.length
+    end
+
+    it "preserves a lone trailing '\\' not immediately followed by a newline" do
+      input = "#define X \\a\n"
+      result, pos = try_directive(input)
+      expect(result).to eq [true, input.rstrip]
+      expect(pos).to eq input.length
+    end
+
+    # The C standard specifies #/## token semantics but not the exact whitespace a
+    # preprocessor emits when reconstructing macro text -- real toolchains can and do
+    # disagree here. Ceedling regenerates this text into partials; it doesn't promise
+    # byte-for-byte reproduction of that spacing, so whitespace immediately touching a
+    # #/## operator is normalized away unconditionally, regardless of which toolchain
+    # (or which of the user's own source formatting choices) put it there.
+    context "whitespace around # and ## operators" do
+      it "trims a space before ##" do
+        result, _pos = try_directive("#define M(x) void f ##x(void) { g(); }\n")
+        expect(result).to eq [true, "#define M(x) void f##x(void) { g(); }"]
+      end
+
+      it "trims a space after ##" do
+        result, _pos = try_directive("#define M(x) void f## x(void) { g(); }\n")
+        expect(result).to eq [true, "#define M(x) void f##x(void) { g(); }"]
+      end
+
+      it "trims space on both sides of ##" do
+        result, _pos = try_directive("#define M(x) void f ## x(void) { g(); }\n")
+        expect(result).to eq [true, "#define M(x) void f##x(void) { g(); }"]
+      end
+
+      it "trims a space after the stringize operator #" do
+        result, _pos = try_directive("#define S(x) # x\n")
+        expect(result).to eq [true, "#define S(x) #x"]
+      end
+
+      it "trims a space before a stringize operator directly gluing onto a preceding identifier" do
+        result, _pos = try_directive("#define M(a, b) a #b\n")
+        expect(result).to eq [true, "#define M(a, b) a#b"]
+      end
+
+      it "does not touch whitespace before # or ## when preceded by punctuation, not an identifier being pasted" do
+        # The space here separates the macro's own parameter list from a
+        # replacement list that happens to start with the operator -- that's
+        # ordinary formatting, not preprocessor-reconstruction spacing around an
+        # operand being pasted, so it's out of this fix's scope.
+        result, _pos = try_directive("#define S(x)  #x\n")
+        expect(result).to eq [true, "#define S(x)  #x"]
+      end
+
+      it "normalizes the GNU comma-deletion ,##__VA_ARGS__ form" do
+        result, _pos = try_directive("#define LOG(fmt, ...) printf(fmt, ## __VA_ARGS__)\n")
+        expect(result).to eq [true, "#define LOG(fmt, ...) printf(fmt, ##__VA_ARGS__)"]
+      end
+
+      it "is idempotent for already-canonical ## spacing" do
+        input = "#define M(x) void f##x(void) { g(); }\n"
+        result, _pos = try_directive(input)
+        expect(result).to eq [true, input.rstrip]
+      end
+
+      it "is idempotent for already-canonical # spacing" do
+        input = "#define S(x) #x\n"
+        result, _pos = try_directive(input)
+        expect(result).to eq [true, input.rstrip]
+      end
+
+      it "does not touch ## inside a string literal" do
+        input = %q{#define M(x) "a ## b"} + "\n"
+        result, _pos = try_directive(input)
+        expect(result).to eq [true, input.rstrip]
+      end
+
+      it "does not touch ## inside a // comment" do
+        input = "#define M(x) x // a ## b\n"
+        result, _pos = try_directive(input)
+        expect(result).to eq [true, input.rstrip]
+      end
+
+      it "does not touch ## inside a /* */ comment" do
+        input = "#define M(x) x /* a ## b */\n"
+        result, _pos = try_directive(input)
+        expect(result).to eq [true, input.rstrip]
+      end
+
+      it "leaves ordinary whitespace unrelated to # or ## untouched" do
+        input = "#define M(x) void  f  (  )  ;\n"
+        result, _pos = try_directive(input)
+        expect(result).to eq [true, input.rstrip]
+      end
+    end
+
+  end
+
+  context "#filter_directive" do
+
+    it "returns the directive text for MACRO_DEFINITION when directive is #define" do
+      text = "#define FOO 42\n"
+      expect( @preprocessing.filter_directive(text, CExtractorPreprocessing::MACRO_DEFINITION) ).to eq text
+    end
+
+    it "returns the directive text for MACRO_DEFINITION when directive is multiline #define" do
+      text = "#define MAX(a,b) \\\n  ((a)>(b)?(a):(b))\n"
+      expect( @preprocessing.filter_directive(text, CExtractorPreprocessing::MACRO_DEFINITION) ).to eq text
+    end
+
+    it "returns the directive text for MACRO_DEFINITION when # define has whitespace after #" do
+      text = "# define FOO\n"
+      expect( @preprocessing.filter_directive(text, CExtractorPreprocessing::MACRO_DEFINITION) ).to eq text
+    end
+
+    it "returns nil for MACRO_DEFINITION when directive is #pragma" do
+      expect( @preprocessing.filter_directive("#pragma once\n", CExtractorPreprocessing::MACRO_DEFINITION) ).to be_nil
+    end
+
+    it "returns nil for MACRO_DEFINITION when directive is #include" do
+      expect( @preprocessing.filter_directive("#include <stdio.h>\n", CExtractorPreprocessing::MACRO_DEFINITION) ).to be_nil
+    end
+
+    it "returns nil for unknown type symbols" do
+      expect( @preprocessing.filter_directive("#define FOO\n", :unknown_type) ).to be_nil
+    end
+
+  end
+
+  context "#try_extract_static_assert" do
+
+    def try_static_assert(text)
+      scanner = StringScanner.new(text)
+      result  = @preprocessing.try_extract_static_assert(scanner)
+      [result, scanner.pos]
+    end
+
+    # --- Failure cases ---
+
+    it "returns [false, nil] when scanner is not at a static assert keyword" do
+      result, pos = try_static_assert('int x = 0;')
+      expect(result).to eq [false, nil]
+      expect(pos).to eq 0
+    end
+
+    it "returns [false, nil] for empty input" do
+      result, pos = try_static_assert('')
+      expect(result).to eq [false, nil]
+      expect(pos).to eq 0
+    end
+
+    it "does not advance scanner on failure" do
+      scanner = StringScanner.new('int x;')
+      @preprocessing.try_extract_static_assert(scanner)
+      expect(scanner.pos).to eq 0
+    end
+
+    it "does not match a longer identifier that ends with the keyword" do
+      result, pos = try_static_assert('not_static_assert(1 == 1, "msg");')
+      expect(result).to eq [false, nil]
+      expect(pos).to eq 0
+    end
+
+    it "returns [false, nil] when the argument list is missing its closing ')'" do
+      result, _pos = try_static_assert('_Static_assert(sizeof(int) == 4')
+      expect(result).to eq [false, nil]
+    end
+
+    it "returns [false, nil] when the terminating ';' is missing" do
+      result, _pos = try_static_assert('_Static_assert(sizeof(int) == 4, "msg")')
+      expect(result).to eq [false, nil]
+    end
+
+    # --- C11 _Static_assert ---
+
+    it "extracts a two-argument C11 _Static_assert with trailing newline" do
+      input = "_Static_assert(sizeof(int) == 4, \"int must be 32-bit\");\n"
+      result, pos = try_static_assert(input)
+      expect(result).to eq [true, input]
+      expect(pos).to eq input.length
+    end
+
+    it "extracts _Static_assert without trailing newline (EOS)" do
+      input = "_Static_assert(1 == 1, \"always true\");"
+      result, pos = try_static_assert(input)
+      expect(result).to eq [true, input]
+      expect(pos).to eq input.length
+    end
+
+    # --- C23 static_assert ---
+
+    it "extracts a one-argument C23 static_assert" do
+      input = "static_assert(sizeof(int) == 4);\n"
+      result, pos = try_static_assert(input)
+      expect(result).to eq [true, input]
+      expect(pos).to eq input.length
+    end
+
+    it "extracts a two-argument C23 static_assert" do
+      input = "static_assert(sizeof(int) == 4, \"int must be 32-bit\");\n"
+      result, pos = try_static_assert(input)
+      expect(result).to eq [true, input]
+      expect(pos).to eq input.length
+    end
+
+    # --- Complex / nested expressions ---
+
+    it "handles sizeof with a struct type in the expression" do
+      input = "_Static_assert(sizeof(struct Point) == 8, \"Point must be 8 bytes\");\n"
+      result, pos = try_static_assert(input)
+      expect(result).to eq [true, input]
+      expect(pos).to eq input.length
+    end
+
+    it "handles offsetof with nested parens in the expression" do
+      input = "_Static_assert(offsetof(struct S, field) == sizeof(int), \"layout\");\n"
+      result, pos = try_static_assert(input)
+      expect(result).to eq [true, input]
+      expect(pos).to eq input.length
+    end
+
+    it "handles deeply nested parentheses in the expression" do
+      input = "_Static_assert(sizeof(int[sizeof(char)]) == 4, \"nested sizeof\");\n"
+      result, pos = try_static_assert(input)
+      expect(result).to eq [true, input]
+      expect(pos).to eq input.length
+    end
+
+    it "handles a boolean expression with multiple parenthesised sub-expressions" do
+      input = "static_assert((sizeof(int) == 4) && (sizeof(long) >= 4));\n"
+      result, pos = try_static_assert(input)
+      expect(result).to eq [true, input]
+      expect(pos).to eq input.length
+    end
+
+    # --- String literal in message argument ---
+
+    it "handles a ')' inside the message string without terminating early" do
+      input = "_Static_assert(1, \"message with ) paren inside\");\n"
+      result, pos = try_static_assert(input)
+      expect(result).to eq [true, input]
+      expect(pos).to eq input.length
+    end
+
+    # --- Comments inside the assertion ---
+
+    it "handles a block comment inside the expression (comment replaced with space)" do
+      input = "_Static_assert(/* condition */ 1 == 1, \"always\");\n"
+      result, pos = try_static_assert(input)
+      expect(result).to be_a Array
+      expect(result[0]).to be true  # text content varies (comment→space); just verify success
+      expect(pos).to eq input.length
+    end
+
+    # --- Whitespace variants ---
+
+    it "handles whitespace between keyword and '('" do
+      input = "_Static_assert  (sizeof(int) == 4, \"msg\");\n"
+      result, pos = try_static_assert(input)
+      expect(result).to eq [true, input]
+      expect(pos).to eq input.length
+    end
+
+    it "handles a multiline static assert" do
+      input = <<~'C'
+        _Static_assert(
+          sizeof(struct BigThing) == 128,
+          "BigThing must be exactly 128 bytes"
+        );
+      C
+      result, pos = try_static_assert(input)
+      expect(result[0]).to be true
+      expect(pos).to eq input.length
+    end
+
+    it "handles a static assert whose terminating ';' falls on its own line after the closing ')'" do
+      input = "static_assert(sizeof(int) == 4, \"msg\")\n;\n"
+      result, pos = try_static_assert(input)
+      expect(result[0]).to be true
+      expect(pos).to eq input.length
+    end
+
+    # --- Boundary behaviour ---
+
+    it "stops at the ';' and does not consume following code" do
+      input  = "_Static_assert(1 == 1, \"ok\");\nint x = 0;"
+      result, pos = try_static_assert(input)
+      expect(result[0]).to be true
+      expect(pos).to eq "_Static_assert(1 == 1, \"ok\");\n".length
+    end
+
+  end
+
+  # A bare, top-level, semicolon-less macro invocation (e.g. an x-macro call that
+  # expands to a full function definition once the macro itself is applied) is
+  # otherwise invisible to every other extractor -- no leading '#', no trailing ';'
+  # or '{'. Structurally closest to #try_extract_static_assert (identifier +
+  # balanced parens + a terminator check), mirrored below.
+  context "#try_extract_bare_macro_invocation" do
+
+    def try_bare_invocation(text)
+      scanner = StringScanner.new(text)
+      result  = @preprocessing.try_extract_bare_macro_invocation(scanner)
+      [result, scanner.pos]
+    end
+
+    # --- Success cases ---
+
+    it "extracts a simple invocation followed by unrelated trailing content" do
+      result, pos = try_bare_invocation("FOO(0)\nint x;")
+      expect(result[0]).to be true
+      expect(result[1].text).to eq 'FOO(0)'
+      expect(pos).to eq 'FOO(0)'.length
+    end
+
+    it "extracts a zero-argument invocation" do
+      result, _pos = try_bare_invocation('FOO()\nBAR')
+      expect(result[0]).to be true
+      expect(result[1].text).to eq 'FOO()'
+    end
+
+    # A bare scanner (unlike extract_next_feature's chunked IO) cannot distinguish "no
+    # more of this chunk yet, more may follow" from "no more content anywhere" -- both
+    # look identical as scanner.eos?. Failing here either way is consistent with
+    # collect_balanced/try_extract_static_assert's own behavior at their own
+    # terminators, and with this codebase's already-established, accepted convention
+    # that unterminated trailing content is silently dropped for every feature type
+    # (an invocation genuinely at true end-of-file with nothing after it is this same,
+    # pre-existing limitation, not a new one).
+    it "does not succeed when the invocation is the only, final content (bare scanner can't tell chunk-boundary from true EOF)" do
+      result, pos = try_bare_invocation('FOO(0)')
+      expect(result).to eq [false, nil]
+      expect(pos).to eq 0
+    end
+
+    it "extracts an invocation followed directly by another bare invocation" do
+      result, pos = try_bare_invocation('FOO(0)BAR(1)')
+      expect(result[0]).to be true
+      expect(result[1].text).to eq 'FOO(0)'
+      expect(pos).to eq 'FOO(0)'.length
+    end
+
+    it "handles nested parens in the argument list" do
+      result, _pos = try_bare_invocation("FOO(BAR(1), 2)\nint x;")
+      expect(result[0]).to be true
+      expect(result[1].text).to eq 'FOO(BAR(1), 2)'
+    end
+
+    it "handles a string literal containing ')', ';', and '{' in the argument list" do
+      result, _pos = try_bare_invocation("FOO(\"a);{ b\")\nint x;")
+      expect(result[0]).to be true
+      expect(result[1].text).to eq 'FOO("a);{ b")'
+    end
+
+    it "handles a comment containing ')', ';', and '{' in the argument list" do
+      result, _pos = try_bare_invocation("FOO(/* ) ; { */ 1)\nint x;")
+      expect(result[0]).to be true
+      expect(result[1].text).to eq 'FOO(/* ) ; { */ 1)'
+    end
+
+    # --- Failure cases ---
+
+    it "returns [false, nil] when scanner is not at an identifier" do
+      result, pos = try_bare_invocation('(0)')
+      expect(result).to eq [false, nil]
+      expect(pos).to eq 0
+    end
+
+    it "returns [false, nil] for empty input" do
+      result, pos = try_bare_invocation('')
+      expect(result).to eq [false, nil]
+      expect(pos).to eq 0
+    end
+
+    it "does not advance scanner on failure" do
+      scanner = StringScanner.new('int x;')
+      @preprocessing.try_extract_bare_macro_invocation(scanner)
+      expect(scanner.pos).to eq 0
+    end
+
+    it "returns [false, nil] when the argument list is missing its closing ')'" do
+      result, pos = try_bare_invocation('FOO(0')
+      expect(result).to eq [false, nil]
+      expect(pos).to eq 0
+    end
+
+    it "does not match a bare identifier with no '(' at all -- an object-like macro name is not this shape" do
+      result, pos = try_bare_invocation("FOO\nstatic int x;")
+      expect(result).to eq [false, nil]
+      expect(pos).to eq 0
+    end
+
+    it "defers to the ordinary call-as-statement path when followed by ';'" do
+      result, pos = try_bare_invocation('FOO(0);')
+      expect(result).to eq [false, nil]
+      expect(pos).to eq 0
+    end
+
+    it "defers to the function-definition path when followed by '{'" do
+      result, pos = try_bare_invocation('FOO(0){}')
+      expect(result).to eq [false, nil]
+      expect(pos).to eq 0
+    end
+
+    it "excludes a __declspec(...) compiler extension -- not a bare invocation in its own right" do
+      result, pos = try_bare_invocation('__declspec(dllexport)')
+      expect(result).to eq [false, nil]
+      expect(pos).to eq 0
+    end
+
+    it "excludes a __word__(...) compiler extension (e.g. __attribute__) -- not a bare invocation in its own right" do
+      result, pos = try_bare_invocation('__attribute__((unused))')
+      expect(result).to eq [false, nil]
+      expect(pos).to eq 0
+    end
+
+  end
+
+end

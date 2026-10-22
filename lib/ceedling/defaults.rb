@@ -1,0 +1,492 @@
+# =========================================================================
+#   Ceedling - Test-Centered Build System for C
+#   ThrowTheSwitch.org
+#   Copyright (c) 2010-26 Mike Karlesky, Mark VanderVoord, & Greg Williams
+#   SPDX-License-Identifier: MIT
+# =========================================================================
+
+require 'ceedling/constants'
+require 'ceedling/system_wrapper'
+require 'ceedling/file_path_utils'
+
+# Assign a default value for system testing where CEEDLING_APPCFG may not be present
+# TODO: Create code config & test structure that does not internalize a test path like this
+CEEDLING_VENDOR = defined?( CEEDLING_APPCFG ) ? CEEDLING_APPCFG[:ceedling_vendor_path] : File.expand_path( File.dirname(__FILE__) + '/../../vendor' )
+
+CEEDLING_PLUGINS = [] unless defined? CEEDLING_PLUGINS
+
+DEFAULT_TEST_COMPILER_TOOL = {
+  :executable => FilePathUtils.os_executable_ext('gcc').freeze,
+  :name => 'default_test_compiler'.freeze,
+  :optional => false.freeze,
+  :arguments => [
+    "-I\"${5}\"".freeze, # Per-test executable search paths
+    "-D\"${6}\"".freeze, # Per-test executable defines
+    "-DGNU_COMPILER".freeze, # OSX clang
+    "-g".freeze,
+    "-c \"${1}\"".freeze,
+    "-o \"${2}\"".freeze,
+    # gcc's list file output options are complex; no use of ${3} parameter in default config
+    "-MMD".freeze,
+    "-MF \"${4}\"".freeze,
+    ].freeze
+  }
+
+DEFAULT_TEST_ASSEMBLER_TOOL = {
+  :executable => FilePathUtils.os_executable_ext('as').freeze,
+  :name => 'default_test_assembler'.freeze,
+  :optional => false.freeze,
+  :arguments => [
+    "-I\"${3}\"".freeze, # Search paths
+    # Any defines (${4}) are not included since GNU assembler ignores them
+    "\"${1}\"".freeze,
+    "-o \"${2}\"".freeze,
+    ].freeze
+  }
+
+DEFAULT_TEST_LINKER_TOOL = {
+  :executable => FilePathUtils.os_executable_ext('gcc').freeze,
+  :name => 'default_test_linker'.freeze,
+  :optional => false.freeze,
+  :arguments => [
+    "${1}".freeze,
+    "${5}".freeze,
+    "-o \"${2}\"".freeze,
+    "".freeze,
+    "${4}".freeze,
+    ].freeze
+  }
+
+DEFAULT_TEST_FIXTURE_TOOL = {
+  :executable => '${1}'.freeze, # Unity test runner executable
+  :name => 'default_test_fixture'.freeze,
+  :optional => false.freeze,
+  :arguments => [].freeze
+  }
+
+DEFAULT_TEST_FIXTURE_SIMPLE_BACKTRACE_TOOL = {
+  :executable => '${1}'.freeze, # Unity test runner executable
+  :name => 'default_test_fixture_simple_backtrace'.freeze,
+  :optional => false.freeze,
+  :arguments => [
+    # Test case matching flag and (quoted) value, fully composed by the caller as
+    # either `-n "<exact name>"` or `-f "<base name>"` -- see
+    # GeneratorTestResultsBacktrace#unity_filter_arg.
+    '${2}'.freeze
+    ].freeze
+  }
+
+
+# Extracts all dependencies as make-style rules.
+# We use this to extract a bare list includes (user + system) from files.
+DEFAULT_TEST_BARE_INCLUDES_PREPROCESSOR_TOOL = {
+  :executable => FilePathUtils.os_executable_ext('gcc').freeze,
+  :name => 'default_test_bare_includes_preprocessor'.freeze,
+  :optional => false.freeze,
+  :arguments => [
+    '-E'.freeze,             # Run only through preprocessor stage with its output
+    '-M'.freeze,             # Output make rule of dependencies including system includes
+    '-MG'.freeze,            # Assume missing header files are generated files (do not discard)
+    '-MP'.freeze,            # Create make "phony" rules for each include dependency
+    "-I\"${4}\"".freeze,     # Per-test shallow includes essential search paths (e.g. Ceedling vendor path)
+    "-D\"${2}\"".freeze,     # Per-test executable defines
+    "-DGNU_COMPILER".freeze, # OSX clang
+    '-nostdinc'.freeze,      # Ignore standard include paths
+    "-x c".freeze,           # Force C language
+    "\"${1}\"".freeze
+    ].freeze
+  }
+
+# Fully expands a given file through the preprocessor
+# Processes #ifdefs, expands macros, etc.
+DEFAULT_TEST_FILE_FULL_PREPROCESSOR_TOOL = {
+  :executable => FilePathUtils.os_executable_ext('gcc').freeze,
+  :name => 'default_test_file_full_preprocessor'.freeze,
+  :optional => false.freeze,
+  :arguments => [
+    '-E'.freeze,
+    "-I\"${4}\"".freeze,     # Per-test executable search paths
+    "-D\"${3}\"".freeze,     # Per-test executable defines
+    "-DGNU_COMPILER".freeze, # OSX clang
+    "-x c".freeze,           # Force C language
+    "\"${1}\"".freeze,
+    "-o \"${2}\"".freeze
+    ].freeze
+  }
+
+# Expands a given file through the preprocessor, preserving directives (macros, includes, etc.).
+# Can be used to extract includes (differentiating system and user indludes) and non-code directives.
+DEFAULT_TEST_FILE_DIRECTIVES_ONLY_PREPROCESSOR_TOOL = {
+  :executable => FilePathUtils.os_executable_ext('gcc').freeze,
+  :name => 'default_test_file_directives_only_preprocessor'.freeze,
+  :optional => false.freeze,
+  :arguments => [
+    '-E'.freeze,
+    "-I\"${4}\"".freeze, # Per-test executable search paths
+    "-D\"${3}\"".freeze, # Per-test executable defines
+    "-DGNU_COMPILER".freeze, # OSX clang
+    "-x c".freeze,           # Force C language
+    "-fdirectives-only",     # Only preprocess directives
+    "\"${1}\"".freeze,
+    "-o \"${2}\"".freeze
+    ].freeze
+  }
+
+DEFAULT_RELEASE_DEPENDENCIES_GENERATOR_TOOL = {
+  :executable => FilePathUtils.os_executable_ext('gcc').freeze,
+  :name => 'default_release_dependencies_generator'.freeze,
+  :optional => false.freeze,
+  :arguments => [
+    '-E'.freeze,
+    {"-I\"$\"" => 'COLLECTION_PATHS_SOURCE_INCLUDE_VENDOR'}.freeze,
+    {"-I\"$\"" => 'COLLECTION_PATHS_RELEASE_TOOLCHAIN_INCLUDE'}.freeze,
+    {"-D$" => 'COLLECTION_DEFINES_RELEASE_AND_VENDOR'}.freeze,
+    {"-D$" => 'DEFINES_RELEASE_PREPROCESS'}.freeze,
+    "-DGNU_COMPILER".freeze,
+    "-MT \"${3}\"".freeze,
+    '-MM'.freeze,
+    '-MD'.freeze,
+    '-MG'.freeze,
+    "-MF \"${2}\"".freeze,
+    "-x c".freeze, # Force C language
+    "-c \"${1}\"".freeze,
+    ].freeze
+  }
+
+DEFAULT_RELEASE_COMPILER_TOOL = {
+  :executable => FilePathUtils.os_executable_ext('gcc').freeze,
+  :name => 'default_release_compiler'.freeze,
+  :optional => false.freeze,
+  :arguments => [
+    "-I\"${5}\"".freeze, # Search paths
+    "-D\"${6}\"".freeze, # Defines
+    "-DGNU_COMPILER".freeze,
+    "-c \"${1}\"".freeze,
+    "-o \"${2}\"".freeze,
+    # gcc's list file output options are complex; no use of ${3} parameter in default config
+    "-MMD".freeze,
+    "-MF \"${4}\"".freeze,
+    ].freeze
+  }
+
+DEFAULT_RELEASE_ASSEMBLER_TOOL = {
+  :executable => FilePathUtils.os_executable_ext('as').freeze,
+  :name => 'default_release_assembler'.freeze,
+  :optional => false.freeze,
+  :arguments => [
+    "-I\"${3}\"".freeze, # Search paths
+    "-D\"${4}\"".freeze, # Defines (FYI--allowed with GNU assembler but ignored)
+    "\"${1}\"".freeze,
+    "-o \"${2}\"".freeze,
+    ].freeze
+  }
+
+DEFAULT_RELEASE_LINKER_TOOL = {
+  :executable => FilePathUtils.os_executable_ext('gcc').freeze,
+  :name => 'default_release_linker'.freeze,
+  :optional => false.freeze,
+  :arguments => [
+    "\"${1}\"".freeze,
+    "${5}".freeze,
+    "-o \"${2}\"".freeze,
+    "".freeze,
+    "${4}".freeze,
+    ].freeze
+  }
+
+DEFAULT_TEST_BACKTRACE_GDB_TOOL = {
+  :executable => FilePathUtils.os_executable_ext('gdb').freeze,
+  :name => 'default_test_backtrace_gdb'.freeze,
+  :optional => false.freeze,
+  :arguments => [
+    '-q'.freeze,
+    '--batch'.freeze,
+    '--eval-command run'.freeze,
+    "--command \"${1}\"".freeze, # Debug script file to run
+    '--args'.freeze,
+    '${2}'.freeze,               # Test executable
+    # Test case matching flag and (quoted) value, fully composed by the caller as
+    # either `-n "<exact name>"` or `-f "<base name>"` -- see
+    # GeneratorTestResultsBacktrace#unity_filter_arg.
+    '${3}'.freeze
+    ].freeze
+  }
+
+DEFAULT_TOOLS_TEST = {
+  :tools => {
+    :test_compiler => DEFAULT_TEST_COMPILER_TOOL,
+    :test_linker   => DEFAULT_TEST_LINKER_TOOL,
+    :test_fixture  => DEFAULT_TEST_FIXTURE_TOOL,
+    :test_fixture_simple_backtrace => DEFAULT_TEST_FIXTURE_SIMPLE_BACKTRACE_TOOL
+    }
+  }
+
+DEFAULT_TOOLS_TEST_GDB_BACKTRACE = {
+  :tools => {
+    :test_backtrace_gdb => DEFAULT_TEST_BACKTRACE_GDB_TOOL
+    }
+  }
+
+DEFAULT_TOOLS_TEST_ASSEMBLER = {
+  :tools => {
+    :test_assembler => DEFAULT_TEST_ASSEMBLER_TOOL,
+    }
+  }
+
+DEFAULT_TOOLS_TEST_PREPROCESSORS = {
+  :tools => {
+    # Extracts include directives as make-style depenedencies
+    :test_bare_includes_preprocessor  => DEFAULT_TEST_BARE_INCLUDES_PREPROCESSOR_TOOL,
+    # Fully expands a given file through the preprocessor
+    :test_file_full_preprocessor              => DEFAULT_TEST_FILE_FULL_PREPROCESSOR_TOOL,
+    # Expands a given file through the preprocessor, preserving directives (macros, includes, etc.)
+    :test_file_directives_only_preprocessor   => DEFAULT_TEST_FILE_DIRECTIVES_ONLY_PREPROCESSOR_TOOL,
+    }
+  }
+
+DEFAULT_TOOLS_RELEASE = {
+  :tools => {
+    :release_compiler => DEFAULT_RELEASE_COMPILER_TOOL,
+    :release_linker   => DEFAULT_RELEASE_LINKER_TOOL,
+    }
+  }
+
+DEFAULT_TOOLS_RELEASE_ASSEMBLER = {
+  :tools => {
+    :release_assembler => DEFAULT_RELEASE_ASSEMBLER_TOOL,
+    }
+  }
+
+DEFAULT_TOOLS_RELEASE_DEPENDENCIES = {
+  :tools => {
+    :release_dependencies_generator => DEFAULT_RELEASE_DEPENDENCIES_GENERATOR_TOOL,
+    }
+  }
+
+
+DEFAULT_RELEASE_TARGET_NAME = 'project'
+
+DEFAULT_CEEDLING_PROJECT_CONFIG = {
+  :project => {
+    # :build_root must be set by user
+    :name => '',
+    :use_mocks => true,
+    :use_exceptions => false,
+    :use_partials => false,
+    :use_test_preprocessor => :none,
+    :compile_threads => 1,
+    :test_threads => 1,
+    :test_file_prefix => 'test_',
+    :release_build => false,
+    :use_backtrace => :simple
+    },
+
+  :release_build => {
+    # :output is set while building configuration -- allows smart default system-dependent file extension handling
+    :use_assembly => false,
+    :artifacts => []
+    },
+
+  :test_build => {
+    :use_assembly => false,
+    # Force fallback text-based preprocessing regardless of preprocessor capability.
+    # Primarily useful for testing the fallback path and for toolchains that report
+    # false support for -fdirectives-only. Default: false (use preprocessor when available).
+    :preprocess_force_fallback => false,
+  },
+
+  :partials => {
+    # A single C construct (declaration, definition, directive, etc.) is extracted into a
+    # growing buffer; this bounds how large that buffer may grow before extraction fails
+    # outright rather than silently dropping an oversized construct and everything after
+    # it in the file. Value is a multiplier of 1000 characters -- 5000 means 5,000,000.
+    :max_extraction_length => 5000,
+  },
+
+  # Unlike other top-level entries, :environment is an array (of hashes) to preserve order
+  :environment => [],
+
+  :paths => {
+    :test => [],    # Must be populated by user
+    :source => [],  # Should be populated by user but TEST_INCLUDE_PATH() could be used exclusively instead
+    :support => [],
+    :include => [], # Must be populated by user
+    :libraries => [],
+    :test_toolchain_include => [],
+    :release_toolchain_include => [],
+    },
+
+  :files => {
+    :test => [],
+    :source => [],
+    :assembly => [],
+    :support => [],
+    :include => [],
+    },
+
+  :defines => {
+    :use_test_definition => false,
+    :test => [],   # List of symbols or matcher hashes with test executables as keys
+    # :preprocess is identical to :test but lacks a default here as missing vs. empty values have additional meaning
+    :release => [] # List of symbols only
+    },
+
+  :flags => {
+    # Test & release flags are validated for presence--empty flags causes an error
+    # :test => {},   # hash/sub-hash of operations containing lists of flags or matcher hashes with test executables as keys
+    # :release => {} # hash/sub-hashes of operations containing lists of flags
+    },
+
+  :libraries => {
+    :flag => '-l${1}',
+    :path_flag => '-L "${1}"',
+    :test => [],
+    :release => []
+    },
+
+  :extension => {
+    :header => '.h',
+    :source => '.c',
+    :assembly => '.s',
+    :object => '.o',
+    :libraries => ['.a','.so'],
+    :executable => ( SystemWrapper.windows? ? EXTENSION_WIN_EXE : EXTENSION_NONWIN_EXE ),
+    :map => '.map',
+    :list => '.lst',
+    :testpass => '.pass',
+    :testfail => '.fail',
+    :dependencies => '.d'
+    # :yaml, for mixin files, is read only from the project file itself (see bin/projectinator.rb)
+    },
+
+  :unity => {
+    :defines => [],
+    :use_param_tests => false,
+    :shuffle_tests => false
+    },
+
+  :cmock => {
+    :includes => [],
+    :defines => [],
+    :plugins => [],
+    :unity_helper_path => [],
+    # Yes, we're duplicating these defaults in CMock, but it's because:
+    #  (A) We always need CMOCK_MOCK_PREFIX in Ceedling's environment
+    #  (B) Test runner generator uses these same configuration values
+    :mock_prefix => 'Mock',
+    :mock_suffix => '',
+    # Names each mock by the folder its #include names so same-named headers stay distinct
+    :mock_name_include_folder => true,
+    # CMock's default duplicated here.
+    # We need a value present so preprocessing logic can safely reference it.
+    :treat_inlines => :exclude,
+    # Just because strict ordering is the way to go
+    :enforce_strict_ordering => true
+    },
+
+  :cexception => {
+    :defines => []
+   },
+
+  :test_runner => {
+    :cmdline_args => false,
+    :includes => [],
+    :defines => [],
+    :file_suffix => '_runner',
+    },
+
+  # All tools populated while building up config / defaults structure
+  :tools => {},
+
+  :plugins => {
+    # Hidden setting, for plugins alone and absent from project configuration docs.
+    # Plugins declare, in their own defaults, which build contexts are peers of :test,
+    # whose :defines and :flags may then hold matcher hashes. A project setting it
+    # replaces every plugin's declaration.
+    :test_build_contexts => []
+    },
+
+  }.freeze
+
+
+CEEDLING_RUNTIME_CONFIG = {
+  :unity => {
+    :vendor_path => CEEDLING_VENDOR
+    },
+
+  :cmock => {
+    :vendor_path => CEEDLING_VENDOR
+    },
+
+  :cexception => {
+    :vendor_path => CEEDLING_VENDOR
+    },
+
+  :plugins => {
+    :load_paths => [],
+    :enabled => CEEDLING_PLUGINS,
+    }
+  }.freeze
+
+
+DEFAULT_TESTS_RESULTS_REPORT_TEMPLATE = %q{
+% preamble       = @ceedling[:plugin_reportinator].test_report_preamble(hash)
+% ignored        = preamble[:ignored]
+% failed         = preamble[:failed]
+% stdout_count   = preamble[:stdout_count]
+% header_prepend = preamble[:header_prepend]
+
+% if (stdout_count > 0)
+<%=@ceedling[:plugin_reportinator].generate_banner(header_prepend + 'TEST OUTPUT')%>
+%   hash[:results][:stdout].each do |string|
+%     string[:collection].each do |item|
+<%=string[:source][:file]%>: "<%=item%>"
+%     end
+%   end
+
+% end
+% if (ignored > 0)
+<%=@ceedling[:plugin_reportinator].generate_banner(header_prepend + 'IGNORED TEST SUMMARY')%>
+%   hash[:results][:ignores].each do |ignore|
+%     ignore[:collection].each do |item|
+%       prefix = "#{ignore[:source][:file]}:#{item[:line]}:#{item[:test]}"
+<%=prefix%>
+% if (item[:message].length > 0)
+: "<%=@ceedling[:plugin_reportinator].reflow_message(item[:message], "#{prefix}: ")%>"
+% else
+<%="\n"%>
+% end
+%     end
+%   end
+
+% end
+% if (failed > 0)
+<%=@ceedling[:plugin_reportinator].generate_banner(header_prepend + 'FAILED TEST SUMMARY')%>
+%   hash[:results][:failures].each do |failure|
+%     failure[:collection].each do |item|
+%       prefix = "#{failure[:source][:file]}:#{item[:line]}:#{item[:test]}"
+<%=prefix%>
+% if (item[:message].length > 0)
+: "<%=@ceedling[:plugin_reportinator].reflow_message(item[:message], "#{prefix}: ")%>"
+% else
+<%="\n"%>
+% end
+%     end
+%   end
+
+% end
+% total_string = hash[:results][:counts][:total].to_s
+% format_string = "%#{total_string.length}i"
+% banner_text = @ceedling[:plugin_reportinator].decorate_summary_banner('OVERALL TEST SUMMARY', failed)
+<%=@ceedling[:plugin_reportinator].generate_banner(header_prepend + banner_text)%>
+% if (hash[:results][:counts][:total] > 0)
+TESTED:  <%=hash[:results][:counts][:total].to_s%>
+PASSED:  <%=sprintf(format_string, hash[:results][:counts][:passed])%>
+FAILED:  <%=sprintf(format_string, failed)%>
+IGNORED: <%=sprintf(format_string, ignored)%>
+% else
+
+No tests executed.
+% end
+
+}

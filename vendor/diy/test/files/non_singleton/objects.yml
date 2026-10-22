@@ -1,0 +1,28 @@
+# =========================================================================
+#   Vendored third-party source, under its own copyright and license.
+#   Not Ceedling code, and carries no Ceedling copyright banner.
+#
+#   DIY ⏩️ Atomic Object
+#   License ⏩️ vendor/diy/LICENSE.txt
+# =========================================================================
+
+
+air:
+
+thread_spinner:
+  compose: air
+  singleton: false
+
+yard:
+
+pig:
+  compose: thread_spinner, yard
+
++inner_sanctum:
+  tick:
+    compose: thread_spinner
+    singleton: false
+
+  fat_cat:
+    compose: thread_spinner, tick, yard
+

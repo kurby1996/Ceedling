@@ -1,0 +1,204 @@
+# =========================================================================
+#   Ceedling - Test-Centered Build System for C
+#   ThrowTheSwitch.org
+#   Copyright (c) 2010-26 Mike Karlesky, Mark VanderVoord, & Greg Williams
+#   SPDX-License-Identifier: MIT
+# =========================================================================
+
+require 'spec_helper'
+require 'ceedling/parsing_parcels'
+
+describe ParsingParcels do
+  before(:each) do
+
+    @parsing_parcels = described_class.new()
+  end
+
+  context "#code_lines" do
+    it "should clean code of encoding problems and comments" do
+      file_contents = <<~CONTENTS
+      /* TEST_SOURCE_FILE("foo.c") */    // Eliminate single line comment block
+      // TEST_SOURCE_FILE("bar.c")       // Eliminate single line comment
+      Some text⛔️
+      /* // /*                           // Eliminate tricky comment block enclosing comments
+        TEST_SOURCE_FILE("boom.c")
+        */   //                          // Eliminate trailing single line comment following block comment
+      More text
+      #define STR1 "/* comment  "        // Strip out (single line) C string containing block comment
+      #define STR2 "  /* comment  "      // Strip out (single line) C string containing block comment
+      CONTENTS
+
+      got = []
+
+      @parsing_parcels.code_lines( StringIO.new( file_contents ) ) do |line|
+        line.strip!
+        got << line if !line.empty?
+      end
+
+      expected = [
+        'Some text', # ⛔️ removed with encoding sanitizing
+        'More text',
+        "#define STR1",
+        "#define STR2"
+      ]
+
+      expect( got ).to eq expected
+    end
+
+    it "removes a single inline block comment, preserving surrounding code" do
+      file_contents = "int x = /* init */ 0;\n"
+      got = []
+
+      @parsing_parcels.code_lines( StringIO.new( file_contents ) ) do |line|
+        line.strip!
+        got << line if !line.empty?
+      end
+
+      expect( got ).to eq( ['int x =  0;'] )
+    end
+
+    it "removes adjacent inline block comments independently, preserving the code between them" do
+      # Greedy /\/\*.*\*\// collapses both comments plus the code between them.
+      # Non-greedy /\/\*.*?\*\// removes each comment individually, preserving the expression.
+      file_contents = "int x = /* foo */ 1 + /* bar */ 2;\n"
+      got = []
+
+      @parsing_parcels.code_lines( StringIO.new( file_contents ) ) do |line|
+        line.strip!
+        got << line if !line.empty?
+      end
+
+      # Greedy (current bug): 'int x =  2;'  — the '1 + ' between the two comments is eaten
+      expect( got ).to eq( ['int x =  1 +  2;'] )
+    end
+
+    it "strips only the string that contains a block comment opener, leaving other strings intact" do
+      # Greedy /"\s*\/\*.*"/ extends from the opening-comment string all the way to the
+      # last double-quote on the line, removing the variable declaration between them.
+      # The corrected pattern uses [^"] to stay within string boundaries.
+      file_contents = "char *a = \"/* \", *b = \"end_\";\n"
+      got = []
+
+      @parsing_parcels.code_lines( StringIO.new( file_contents ) ) do |line|
+        line.strip!
+        got << line if !line.empty?
+      end
+
+      # Greedy (current bug): 'char *a = ;'  — '*b = "end_"' is swallowed by the greedy match
+      expect( got ).to eq( ['char *a = , *b = "end_";'] )
+    end
+
+    it "cleans an incomplete (truncated) multi-byte UTF-8 sequence without raising, wherever it falls on a line" do
+      # \xE4\xBD is the first two of three bytes of U+4F60 (你), missing its
+      # final continuation byte -- a "half" Unicode character, as if clipped
+      # by a chunk boundary or a truncated copy/paste. One case mid-line,
+      # one right at a line's end, immediately before the newline.
+      half = [0xE4, 0xBD].pack('C*').force_encoding('BINARY')
+      file_contents = ("abc" + half + "def\n" + "ghi" + half + "\n").force_encoding('BINARY')
+      got = []
+
+      expect {
+        @parsing_parcels.code_lines( StringIO.new( file_contents ) ) do |line|
+          line.strip!
+          got << line if !line.empty?
+        end
+      }.not_to raise_error
+
+      expect( got ).to eq( ['abcdef', 'ghi'] )
+    end
+
+    it "should treat continuations as a single line" do
+      file_contents = "// TEST_SOURCE_FILE(\"foo.c\") \\  \nTEST_SOURCE_FILE(\"bar.c\")\nSome text⛔️ \\\nMore text\n"
+      got = []
+
+      @parsing_parcels.code_lines( StringIO.new( file_contents ) ) do |line|
+        line.strip!
+        got << line if !line.empty?
+      end
+
+      expected = [
+        'Some text More text'
+      ]
+
+      expect( got ).to eq expected
+    end
+  end
+
+  context "#code_lines_with_num" do
+    it "should clean code of encoding problems and comments" do
+      file_contents = <<~CONTENTS
+      /* TEST_SOURCE_FILE("foo.c") */    // Eliminate single line comment block
+      // TEST_SOURCE_FILE("bar.c")       // Eliminate single line comment
+      Some text⛔️
+      /* // /*                           // Eliminate tricky comment block enclosing comments
+        TEST_SOURCE_FILE("boom.c")
+        */   //                          // Eliminate trailing single line comment following block comment
+      More text
+      #define STR1 "/* comment  "        // Strip out (single line) C string containing block comment
+      #define STR2 "  /* comment  "      // Strip out (single line) C string containing block comment
+      CONTENTS
+
+      got = []
+
+      @parsing_parcels.code_lines_with_num( StringIO.new( file_contents ) ) do |line, num|
+        line.strip!
+        got << {:text => line, :num => num} if !line.empty?
+      end
+
+      expected = [
+        {:text => 'Some text', :num => 3}, # ⛔️ removed with encoding sanitizing
+        {:text => 'More text', :num => 7},
+        {:text => "#define STR1", :num => 8},
+        {:text => "#define STR2", :num => 9}
+      ]
+
+      expect( got ).to eq expected
+    end
+
+    # Characterizes today's contract before a 3rd yielded value is added below: for a
+    # folded backslash continuation, the 2nd value (num) is the FIRST physical line of
+    # the run, not the last. This must keep passing unmodified -- every existing
+    # consumer of this 2nd value (generator_test_runner.rb#remap_line_numbers!, and
+    # every code_lines caller via its own 1-arg pass-through) depends on this exact
+    # meaning never changing.
+    it "reports the first physical line of a folded continuation as its (2-arg) line number" do
+      file_contents = "one\ntwo \\\nthree\nfour\n"
+      got = []
+
+      @parsing_parcels.code_lines_with_num( StringIO.new( file_contents ) ) do |line, num|
+        got << [line.strip, num]
+      end
+
+      expect( got ).to eq( [['one', 1], ['two three', 2], ['four', 4]] )
+    end
+
+    # A block declaring a 3rd parameter receives the line's ENDING physical line number
+    # too -- for an ordinary, uncontinued line this is identical to the 2nd value; for a
+    # folded continuation it's the run's LAST physical line, not its first. This is what
+    # PreprocessinatorIncludesHandler#computed_include_source_lines needs to correlate a
+    # multi-physical-line computed #include against -fdirectives-only's own line markers
+    # (see preprocess/README.md) -- gcc attributes a consumed directive's entering marker
+    # to its last physical line, not its first.
+    it "reports the ending physical line as a 3rd yielded value, distinct from the start for a continuation" do
+      file_contents = "one\ntwo \\\nthree\nfour\n"
+      got = []
+
+      @parsing_parcels.code_lines_with_num( StringIO.new( file_contents ) ) do |line, start_num, end_num|
+        got << [line.strip, start_num, end_num]
+      end
+
+      expect( got ).to eq( [['one', 1, 1], ['two three', 2, 3], ['four', 4, 4]] )
+    end
+
+    it "reports the ending physical line across a 3-physical-line continuation" do
+      file_contents = "a\nb \\\nc \\\nd\ne\n"
+      got = []
+
+      @parsing_parcels.code_lines_with_num( StringIO.new( file_contents ) ) do |line, start_num, end_num|
+        got << [line.strip, start_num, end_num]
+      end
+
+      expect( got ).to eq( [['a', 1, 1], ['b c d', 2, 4], ['e', 5, 5]] )
+    end
+  end
+end

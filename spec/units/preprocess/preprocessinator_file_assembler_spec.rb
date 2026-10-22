@@ -1,0 +1,795 @@
+# =========================================================================
+#   Ceedling - Test-Centered Build System for C
+#   ThrowTheSwitch.org
+#   Copyright (c) 2010-25 Mike Karlesky, Mark VanderVoord, & Greg Williams
+#   SPDX-License-Identifier: MIT
+# =========================================================================
+
+require 'spec_helper'
+require 'stringio'
+require 'include_guard_helper'
+require 'ceedling/preprocess/preprocessinator_file_assembler'
+require 'ceedling/preprocess/preprocessinator_reconstructor'
+require 'ceedling/parsing_parcels'
+require 'ceedling/encodinator'
+
+RSpec.describe PreprocessinatorFileAssembler do
+  include IncludeGuardHelper
+
+
+  # Use real ParsingParcels for _filter_conditionals and collect_file_contents_fallback tests
+  let(:real_parsing_parcels) { ParsingParcels.new }
+  let(:real_reconstructor) do
+    PreprocessinatorReconstructor.new({ parsing_parcels: real_parsing_parcels, file_wrapper: @file_wrapper })
+  end
+
+  before :each do
+    @configurator   = double('configurator')
+    @tool_executor  = double('tool_executor')
+    @file_path_utils = double('file_path_utils')
+    @file_wrapper   = double('file_wrapper')
+    # Whoever writes a preprocessed file creates its directory, since the path may mirror
+    # a source's own namespace below the test's flat preprocess directories.
+    allow(@file_wrapper).to receive(:mkdir)
+    @loginator      = double('loginator')
+    @reportinator   = double('reportinator')
+
+    allow(@loginator).to receive(:log)
+    allow(@reportinator).to receive(:generate_module_progress).and_return('')
+  end
+
+  subject do
+    PreprocessinatorFileAssembler.new(
+      {
+        preprocessinator_reconstructor: real_reconstructor,
+        configurator:    @configurator,
+        tool_executor:   @tool_executor,
+        file_path_utils: @file_path_utils,
+        file_wrapper:    @file_wrapper,
+        parsing_parcels: real_parsing_parcels,
+        loginator:       @loginator,
+        reportinator:    @reportinator
+      }
+    )
+  end
+
+  # Helper: stub file_wrapper.open (or, for a real-mode 'r' read -- every one of
+  # which in this file reads a file this same build just produced via gcc --
+  # open_with_retry) to yield StringIO of content.
+  def stub_file_open(filepath, content, mode='rb')
+    method = (mode == 'r') ? :open_with_retry : :open
+    allow(@file_wrapper).to receive(method).with(filepath, mode).and_yield(StringIO.new(content))
+  end
+
+
+  # ===========================================================================
+  describe '#collect_file_contents_fallback' do
+  # ===========================================================================
+
+    let(:filepath) { '/src/module.c' }
+
+
+    context 'preprocessor directive stripping' do
+
+      it 'strips #include directives from output' do
+        stub_file_open(filepath, "#include \"foo.h\"\nint x = 0;\n")
+        result = subject.collect_file_contents_fallback(source_filepath: filepath)
+        expect(result).not_to include('#include "foo.h"')
+        expect(result).to include('int x = 0;')
+      end
+
+      it 'strips #define directives from output' do
+        stub_file_open(filepath, "#define MAX 100\nint x = 0;\n")
+        result = subject.collect_file_contents_fallback(source_filepath: filepath)
+        expect(result).not_to include('#define MAX 100')
+        expect(result).to include('int x = 0;')
+      end
+
+      it 'strips #pragma directives from output' do
+        stub_file_open(filepath, "#pragma once\nint x = 0;\n")
+        result = subject.collect_file_contents_fallback(source_filepath: filepath)
+        expect(result).not_to include('#pragma once')
+        expect(result).to include('int x = 0;')
+      end
+
+      it 'strips #ifdef and #endif directives from output' do
+        content = "#ifdef FOO\nint x = 0;\n#endif\n"
+        stub_file_open(filepath, content)
+        result = subject.collect_file_contents_fallback(source_filepath: filepath, defines: ['FOO'])
+        expect(result.join).not_to match(/#\s*ifdef/)
+        expect(result.join).not_to match(/#\s*endif/)
+      end
+
+      it 'strips #undef directives from output' do
+        stub_file_open(filepath, "#undef MAX\nint x = 0;\n")
+        result = subject.collect_file_contents_fallback(source_filepath: filepath)
+        expect(result).not_to include('#undef MAX')
+        expect(result).to include('int x = 0;')
+      end
+
+      it 'strips directives with leading whitespace' do
+        stub_file_open(filepath, "  #include <stdio.h>\nint x = 0;\n")
+        result = subject.collect_file_contents_fallback(source_filepath: filepath)
+        expect(result.join(' ')).not_to match(/#include/)
+        expect(result).to include('int x = 0;')
+      end
+
+      it 'returns an empty array for a file containing only preprocessor directives' do
+        content = "#include \"foo.h\"\n#define BAR 1\n#pragma once\n"
+        stub_file_open(filepath, content)
+        result = subject.collect_file_contents_fallback(source_filepath: filepath)
+        expect(result.reject { |l| l.strip.empty? }).to be_empty
+      end
+
+    end
+
+
+    context 'code line preservation' do
+
+      it 'preserves function declarations' do
+        stub_file_open(filepath, "void my_func(int x);\n")
+        result = subject.collect_file_contents_fallback(source_filepath: filepath)
+        expect(result).to include('void my_func(int x);')
+      end
+
+      it 'preserves function bodies' do
+        content = "void my_func(void) {\n  return;\n}\n"
+        stub_file_open(filepath, content)
+        result = subject.collect_file_contents_fallback(source_filepath: filepath)
+        expect(result).to include('void my_func(void) {')
+        expect(result).to include('  return;')
+        expect(result).to include('}')
+      end
+
+      it 'preserves inline // comments on code lines' do
+        stub_file_open(filepath, "int x = 0;  // initialize counter\n")
+        result = subject.collect_file_contents_fallback(source_filepath: filepath)
+        expect(result).to include('int x = 0;  // initialize counter')
+      end
+
+      it 'preserves block comments on code lines' do
+        stub_file_open(filepath, "int x = 0; /* zero-init */\n")
+        result = subject.collect_file_contents_fallback(source_filepath: filepath)
+        expect(result).to include('int x = 0; /* zero-init */')
+      end
+
+      it 'preserves standalone comment lines' do
+        stub_file_open(filepath, "/* Full-line comment. */\nint x = 0;\n")
+        result = subject.collect_file_contents_fallback(source_filepath: filepath)
+        expect(result).to include('/* Full-line comment. */')
+      end
+
+    end
+
+
+    context 'conditional filtering with defines' do
+
+      it 'excludes code inside inactive #ifdef block' do
+        content = <<~C
+          int a = 1;
+          #ifdef UNDEFINED_MACRO
+          int b = 2;
+          #endif
+          int c = 3;
+        C
+        stub_file_open(filepath, content)
+        result = subject.collect_file_contents_fallback(source_filepath: filepath, defines: [])
+        lines = result.map(&:strip).reject(&:empty?)
+        expect(lines).to include('int a = 1;')
+        expect(lines).not_to include('int b = 2;')
+        expect(lines).to include('int c = 3;')
+      end
+
+      it 'includes code inside active #ifdef block' do
+        content = <<~C
+          int a = 1;
+          #ifdef MY_FEATURE
+          int b = 2;
+          #endif
+          int c = 3;
+        C
+        stub_file_open(filepath, content)
+        result = subject.collect_file_contents_fallback(
+          source_filepath: filepath, defines: ['MY_FEATURE']
+        )
+        lines = result.map(&:strip).reject(&:empty?)
+        expect(lines).to include('int a = 1;')
+        expect(lines).to include('int b = 2;')
+        expect(lines).to include('int c = 3;')
+      end
+
+      it 'includes #else branch when #ifdef is inactive' do
+        content = <<~C
+          #ifdef PLATFORM_A
+          int platform = 0;
+          #else
+          int platform = 1;
+          #endif
+        C
+        stub_file_open(filepath, content)
+        result = subject.collect_file_contents_fallback(source_filepath: filepath, defines: [])
+        lines = result.map(&:strip).reject(&:empty?)
+        expect(lines).not_to include('int platform = 0;')
+        expect(lines).to include('int platform = 1;')
+      end
+
+      it 'excludes #else branch when #ifdef is active' do
+        content = <<~C
+          #ifdef PLATFORM_A
+          int platform = 0;
+          #else
+          int platform = 1;
+          #endif
+        C
+        stub_file_open(filepath, content)
+        result = subject.collect_file_contents_fallback(
+          source_filepath: filepath, defines: ['PLATFORM_A']
+        )
+        lines = result.map(&:strip).reject(&:empty?)
+        expect(lines).to include('int platform = 0;')
+        expect(lines).not_to include('int platform = 1;')
+      end
+
+    end
+
+
+    context 'encoding safety' do
+
+      it 'does not raise on UTF-8 characters in comments; keeps comment lines in output' do
+        # clean_encoding strips non-ASCII (© etc.) but must not crash.
+        # The comment line itself should still appear in output.
+        stub_file_open(filepath, "/* © 2024 — résumé */\nint x = 0;\n")
+        result = nil
+        expect { result = subject.collect_file_contents_fallback(source_filepath: filepath) }.not_to raise_error
+        expect(result).not_to be_empty
+        expect(result).to include('int x = 0;')
+      end
+
+      it 'does not raise on non-ASCII in kept code lines' do
+        stub_file_open(filepath, "int x = 0;  // naïve\n")
+        expect {
+          result = subject.collect_file_contents_fallback(source_filepath: filepath)
+          expect(result).not_to be_empty
+        }.not_to raise_error
+      end
+
+      it 'does not raise on non-ASCII near conditional directives' do
+        content = "/* © */\n#ifdef FEATURE\nint x = 1;\n#endif\n"
+        stub_file_open(filepath, content)
+        expect {
+          result = subject.collect_file_contents_fallback(
+            source_filepath: filepath, defines: ['FEATURE']
+          )
+          lines = result.map(&:strip).reject(&:empty?)
+          expect(lines).to include('int x = 1;')
+        }.not_to raise_error
+      end
+
+    end
+
+  end
+
+
+  # ===========================================================================
+  describe '#collect_mockable_header_file_contents' do
+  # ===========================================================================
+
+    let(:test) { 'test_module' }
+    let(:filepath) { '/src/module.h' }
+    let(:directives_only_filepath) { '/build/directives/module.h' }
+    let(:preprocessed_filepath) { '/build/full_expansion/module.h' }
+    let(:flags) { [] }
+    let(:defines) { [] }
+    let(:include_paths) { [] }
+
+    before :each do
+      allow(@file_path_utils).to receive(:form_preprocessed_file_full_expansion_filepath)
+        .with(filepath, test).and_return(preprocessed_filepath)
+      allow(@configurator).to receive(:tools_test_file_full_preprocessor).and_return(:full_preprocessor)
+      allow(@tool_executor).to receive(:build_command_line).and_return('gcc -E ...')
+      allow(@tool_executor).to receive(:exec)
+      stub_file_open(preprocessed_filepath, "# 1 \"#{filepath}\"\nint x;\n", 'r')
+    end
+
+    def call_collect_mockable(fallback:, extras:)
+      subject.collect_mockable_header_file_contents(
+        test: test,
+        filepath: filepath,
+        directives_only_filepath: directives_only_filepath,
+        fallback: fallback,
+        flags: flags,
+        defines: defines,
+        include_paths: include_paths,
+        extras: extras
+      )
+    end
+
+    context 'when extras are not requested' do
+
+      it 'returns an empty extras list and a nil include guard' do
+        _contents, extras, include_guard = call_collect_mockable(fallback: true, extras: false)
+        expect(extras).to eq([])
+        expect(include_guard).to be_nil
+      end
+
+      it 'does not read the original file to look for an include guard' do
+        expect(@file_wrapper).not_to receive(:read)
+        call_collect_mockable(fallback: true, extras: false)
+      end
+
+    end
+
+    context 'when extras are requested' do
+
+      let(:header_with_guard) do
+        <<~C
+          #ifndef FOO_H
+          #define FOO_H
+
+          void foo(void);
+
+          #endif
+        C
+      end
+
+      it 'extracts the include guard from the original file in fallback mode' do
+        allow(@file_wrapper).to receive(:read).with(filepath, 2048).and_return(header_with_guard)
+        stub_file_open(filepath, header_with_guard, 'rb')
+
+        _contents, _extras, include_guard = call_collect_mockable(fallback: true, extras: true)
+        expect(include_guard).to eq('FOO_H')
+      end
+
+      it 'extracts the include guard from the original file in directives-only mode' do
+        allow(@file_wrapper).to receive(:read).with(filepath, 2048).and_return(header_with_guard)
+        stub_file_open(directives_only_filepath, header_with_guard, 'r')
+
+        _contents, _extras, include_guard = call_collect_mockable(fallback: false, extras: true)
+        expect(include_guard).to eq('FOO_H')
+      end
+
+      it 'returns a nil include guard when the original file has no #ifndef/#define guard pair' do
+        header_without_guard = "#pragma once\n\nvoid foo(void);\n"
+        allow(@file_wrapper).to receive(:read).with(filepath, 2048).and_return(header_without_guard)
+        stub_file_open(filepath, header_without_guard, 'rb')
+
+        _contents, _extras, include_guard = call_collect_mockable(fallback: true, extras: true)
+        expect(include_guard).to be_nil
+      end
+
+    end
+
+  end
+
+
+  # ===========================================================================
+  # A reconstructed header falls back to a synthetic guard whenever its original carried
+  # none to reuse. Two headers sharing a basename in one test must not land on the same
+  # guard, or whichever the compiler reads second is emptied of its declarations.
+  describe 'synthetic include guard' do
+    def assemble(path)
+      written = StringIO.new
+      allow(@file_wrapper).to receive(:open).and_yield( written )
+
+      subject.assemble_preprocessed_header_file(
+        filepath: path,
+        preprocessed_filepath: "/build/#{path}",
+        contents: [], extras: [], includes: []
+      )
+
+      written.string[/#ifndef (\S+)/, 1]
+    end
+
+    it 'distinguishes two headers sharing a basename' do
+      expect( assemble('drivers/uart/config.h') ).to_not eq( assemble('drivers/spi/config.h') )
+    end
+
+    it 'reuses the original header-s own guard when there is one to reuse' do
+      written = StringIO.new
+      allow(@file_wrapper).to receive(:open).and_yield( written )
+
+      subject.assemble_preprocessed_header_file(
+        filepath: 'drivers/uart/config.h',
+        preprocessed_filepath: '/build/drivers/uart/config.h',
+        contents: [], extras: [], includes: [], include_guard: 'ORIGINAL_GUARD_H'
+      )
+
+      expect( written.string ).to include('#ifndef ORIGINAL_GUARD_H')
+    end
+  end
+
+  # A preprocessed artifact's path mirrors its source's own namespace, so the directory may
+  # not exist yet. Whoever writes the file creates it.
+  describe 'output directory creation' do
+    it 'creates the directory before writing a preprocessed header file' do
+      allow(@file_wrapper).to receive(:open)
+
+      expect(@file_wrapper).to receive(:mkdir).with('/build/files/drivers/uart')
+
+      subject.assemble_preprocessed_header_file(
+        filepath: 'config.h',
+        preprocessed_filepath: '/build/files/drivers/uart/config.h',
+        contents: [], extras: [], includes: []
+      )
+    end
+
+    it 'creates the directory before writing a preprocessed code file' do
+      allow(@file_wrapper).to receive(:open)
+
+      expect(@file_wrapper).to receive(:mkdir).with('/build/files/drivers/spi')
+
+      subject.assemble_preprocessed_code_file(
+        filename: 'config.c',
+        preprocessed_filepath: '/build/files/drivers/spi/config.c',
+        contents: [], extras: [], includes: []
+      )
+    end
+  end
+
+  describe '#assemble_preprocessed_header_file' do
+  # ===========================================================================
+
+    let(:preprocessed_filepath) { '/build/mocks/test_module/module.h' }
+
+    # Binary mode ('wb'): `contents` lines assembled into this file come from
+    # an upstream preprocessed file and must reach disk with their line
+    # endings unaltered, which text mode would not guarantee.
+    def stub_file_write(filepath)
+      output = StringIO.new
+      allow(@file_wrapper).to receive(:open).with(filepath, 'wb').and_yield(output)
+      output
+    end
+
+    it 'writes the given include guard name as the #ifndef/#define/#endif guard' do
+      output = stub_file_write(preprocessed_filepath)
+
+      subject.assemble_preprocessed_header_file(
+        filepath:              'module.h',
+        preprocessed_filepath: preprocessed_filepath,
+        contents:              ['void foo(void);'],
+        extras:                [],
+        includes:              [],
+        include_guard:         'FOO_H'
+      )
+
+      expect(output.string).to include("#ifndef FOO_H\n")
+      expect(output.string).to include("#define FOO_H\n")
+      expect(output.string).to include('#endif // FOO_H')
+    end
+
+    it 'derives a synthetic include guard from the filename when none is given' do
+      output = stub_file_write(preprocessed_filepath)
+
+      subject.assemble_preprocessed_header_file(
+        filepath:              'module.h',
+        preprocessed_filepath: preprocessed_filepath,
+        contents:              ['void foo(void);'],
+        extras:                [],
+        includes:              []
+      )
+
+      expect(mask_include_guard_hashes(output.string)).to include("#ifndef GEN<HASH>_MODULE_H_CEEDLING\n")
+      expect(mask_include_guard_hashes(output.string)).to include("#define GEN<HASH>_MODULE_H_CEEDLING\n")
+    end
+
+    it 'writes provided includes and contents between the guard lines' do
+      output = stub_file_write(preprocessed_filepath)
+
+      subject.assemble_preprocessed_header_file(
+        filepath:              'module.h',
+        preprocessed_filepath: preprocessed_filepath,
+        contents:              ['void foo(void);'],
+        extras:                [],
+        includes:              ['#include "bar.h"'],
+        include_guard:         'FOO_H'
+      )
+
+      expect(output.string).to include('#include "bar.h"')
+      expect(output.string).to include('void foo(void);')
+    end
+
+    it 'opens its output file in binary mode' do
+      stub_file_write(preprocessed_filepath)
+
+      subject.assemble_preprocessed_header_file(
+        filepath:              'module.h',
+        preprocessed_filepath: preprocessed_filepath,
+        contents:              [],
+        extras:                [],
+        includes:              []
+      )
+
+      expect(@file_wrapper).to have_received(:open).with(preprocessed_filepath, 'wb')
+    end
+
+    it "passes content lines through to the output file unchanged, including embedded CRLF" do
+      output = stub_file_write(preprocessed_filepath)
+      content_line_with_crlf = "void foo(void) {\r\n  return;\r\n}"
+
+      subject.assemble_preprocessed_header_file(
+        filepath:              'module.h',
+        preprocessed_filepath: preprocessed_filepath,
+        contents:              [content_line_with_crlf],
+        extras:                [],
+        includes:              []
+      )
+
+      expect(output.string).to include(content_line_with_crlf)
+    end
+
+    it 'writes a String extra as a single line' do
+      output = stub_file_write(preprocessed_filepath)
+
+      subject.assemble_preprocessed_header_file(
+        filepath:              'module.h',
+        preprocessed_filepath: preprocessed_filepath,
+        contents:              [],
+        extras:                ['#define FOO 1'],
+        includes:              []
+      )
+
+      expect(output.string).to include("#define FOO 1\n")
+    end
+
+    it 'writes each line of an Array extra' do
+      output = stub_file_write(preprocessed_filepath)
+
+      subject.assemble_preprocessed_header_file(
+        filepath:              'module.h',
+        preprocessed_filepath: preprocessed_filepath,
+        contents:              [],
+        extras:                [ ['#define FOO(x) \\', '  (x + 1)'] ],
+        includes:              []
+      )
+
+      expect(output.string).to include("#define FOO(x) \\\n")
+      expect(output.string).to include("  (x + 1)\n")
+    end
+
+  end
+
+
+  # ===========================================================================
+  describe '#assemble_preprocessed_code_file' do
+  # ===========================================================================
+
+    let(:preprocessed_filepath) { '/build/test/preprocess/module.c' }
+
+    # Binary mode ('wb'): `contents` lines assembled into this file come from
+    # an upstream preprocessed file and must reach disk with their line
+    # endings unaltered, which text mode would not guarantee.
+    def stub_file_write(filepath)
+      output = StringIO.new
+      allow(@file_wrapper).to receive(:open).with(filepath, 'wb').and_yield(output)
+      output
+    end
+
+    it 'writes provided includes and contents to the output file' do
+      output = stub_file_write(preprocessed_filepath)
+
+      subject.assemble_preprocessed_code_file(
+        filename:              'module.c',
+        preprocessed_filepath: preprocessed_filepath,
+        contents:              ['void foo(void) {}'],
+        extras:                [],
+        includes:              ['#include "bar.h"']
+      )
+
+      expect(output.string).to include('#include "bar.h"')
+      expect(output.string).to include('void foo(void) {}')
+    end
+
+    it 'opens its output file in binary mode' do
+      stub_file_write(preprocessed_filepath)
+
+      subject.assemble_preprocessed_code_file(
+        filename:              'module.c',
+        preprocessed_filepath: preprocessed_filepath,
+        contents:              [],
+        extras:                [],
+        includes:              []
+      )
+
+      expect(@file_wrapper).to have_received(:open).with(preprocessed_filepath, 'wb')
+    end
+
+    it "passes content lines through to the output file unchanged, including embedded CRLF" do
+      output = stub_file_write(preprocessed_filepath)
+      content_line_with_crlf = "void foo(void) {\r\n  return;\r\n}"
+
+      subject.assemble_preprocessed_code_file(
+        filename:              'module.c',
+        preprocessed_filepath: preprocessed_filepath,
+        contents:              [content_line_with_crlf],
+        extras:                [],
+        includes:              []
+      )
+
+      expect(output.string).to include(content_line_with_crlf)
+    end
+
+    it 'writes a String extra as a single line' do
+      output = stub_file_write(preprocessed_filepath)
+
+      subject.assemble_preprocessed_code_file(
+        filename:              'module.c',
+        preprocessed_filepath: preprocessed_filepath,
+        contents:              [],
+        extras:                ['TEST_SOURCE_FILE("other.c")'],
+        includes:              []
+      )
+
+      expect(output.string).to include("TEST_SOURCE_FILE(\"other.c\")\n")
+    end
+
+    it 'writes each line of an Array extra' do
+      output = stub_file_write(preprocessed_filepath)
+
+      subject.assemble_preprocessed_code_file(
+        filename:              'module.c',
+        preprocessed_filepath: preprocessed_filepath,
+        contents:              [],
+        extras:                [ ['TEST_CASE(1, 2)', 'TEST_CASE(3, 4)'] ],
+        includes:              []
+      )
+
+      expect(output.string).to include("TEST_CASE(1, 2)\n")
+      expect(output.string).to include("TEST_CASE(3, 4)\n")
+    end
+
+  end
+
+
+  # ===========================================================================
+  describe '#collect_file_contents_from_directives_only_preprocessing' do
+  # ===========================================================================
+
+    it 'extracts file content from the raw directives-only preprocessor output' do
+      source_filepath = 'test/test_widget.c'
+      allow(@file_path_utils).to receive(:form_preprocessed_file_raw_directives_only_filepath)
+        .with(source_filepath, 'test_widget')
+        .and_return('/build/directives_only/raw_test_widget.c')
+
+      file_contents = [
+        "# 1 \"#{source_filepath}\" 99999",
+        'void test_ShouldDoSomething(void) {}'
+      ].join("\n")
+      stub_file_open('/build/directives_only/raw_test_widget.c', file_contents, 'r')
+
+      result = subject.collect_file_contents_from_directives_only_preprocessing(
+        source_filepath: source_filepath, test: 'test_widget'
+      )
+
+      expect(result).to eq(['void test_ShouldDoSomething(void) {}'])
+    end
+
+  end
+
+
+  # ===========================================================================
+  describe '#collect_file_contents_from_full_expansion' do
+  # ===========================================================================
+
+    it 'extracts file content from the full-expansion preprocessor output' do
+      source_filepath = 'src/module.c'
+      allow(@file_path_utils).to receive(:form_preprocessed_file_full_expansion_filepath)
+        .with(source_filepath, 'test_module')
+        .and_return('/build/full_expansion/module.c')
+
+      file_contents = [
+        "# 1 \"#{source_filepath}\" 99999",
+        'void Module_Init(void) {}'
+      ].join("\n")
+      stub_file_open('/build/full_expansion/module.c', file_contents, 'r')
+
+      result = subject.collect_file_contents_from_full_expansion(
+        source_filepath: source_filepath, test: 'test_module'
+      )
+
+      expect(result).to eq(['void Module_Init(void) {}'])
+    end
+
+  end
+
+
+  # ===========================================================================
+  describe '#collect_macros_and_pragmas_fallback' do
+  # ===========================================================================
+
+    let(:source_filepath) { '/src/module.h' }
+
+    it 'extracts pragmas and macro definitions, excluding the include guard\'s own #define' do
+      allow(@file_wrapper).to receive(:read).with(source_filepath, 2048).and_return(
+        "#ifndef MODULE_H\n#define MODULE_H\n"
+      )
+      content = <<~C
+        #ifndef MODULE_H
+        #define MODULE_H
+        #pragma pack(1)
+        #define MAX_SIZE 10
+        void foo(void);
+        #endif
+      C
+      stub_file_open(source_filepath, content, 'rb')
+
+      result = subject.collect_macros_and_pragmas_fallback(source_filepath: source_filepath)
+
+      expect(result).to include('#pragma pack(1)')
+      expect(result).to include('#define MAX_SIZE 10')
+      expect(result).not_to include('#define MODULE_H')
+    end
+
+    it 'filters out macros inside an inactive conditional block' do
+      allow(@file_wrapper).to receive(:read).with(source_filepath, 2048).and_return('')
+      content = <<~C
+        #ifdef FEATURE_X
+        #define FEATURE_MACRO 1
+        #endif
+        #define ALWAYS_MACRO 2
+      C
+      stub_file_open(source_filepath, content, 'rb')
+
+      result = subject.collect_macros_and_pragmas_fallback(source_filepath: source_filepath, defines: [])
+
+      expect(result).not_to include('#define FEATURE_MACRO 1')
+      expect(result).to include('#define ALWAYS_MACRO 2')
+    end
+
+  end
+
+
+  # ===========================================================================
+  describe '#collect_test_file_contents' do
+  # ===========================================================================
+
+    let(:filepath) { 'test/test_widget.c' }
+
+    before do
+      allow(@file_path_utils).to receive(:form_preprocessed_file_full_expansion_filepath).and_return('/build/full_expansion/test_widget.c')
+      allow(@configurator).to receive(:tools_test_file_full_preprocessor).and_return({})
+      allow(@tool_executor).to receive(:build_command_line).and_return({})
+      allow(@tool_executor).to receive(:exec)
+
+      full_expansion = [
+        "# 1 \"#{filepath}\" 99999",
+        'void test_ShouldDoSomething(void) {}'
+      ].join("\n")
+      stub_file_open('/build/full_expansion/test_widget.c', full_expansion, 'r')
+    end
+
+    it 'extracts contents from the full expansion and test directives via the fallback text scan when fallback: true' do
+      original_content = <<~C
+        TEST_SOURCE_FILE("other.c")
+        void test_ShouldDoSomething(void) {}
+      C
+      stub_file_open(filepath, original_content, 'rb')
+
+      contents, test_directives = subject.collect_test_file_contents(
+        test: 'test_widget', filepath: filepath, directives_only_filepath: '/build/directives_only/test_widget.c',
+        fallback: true, flags: [], defines: [], include_paths: []
+      )
+
+      expect(contents).to include('void test_ShouldDoSomething(void) {}')
+      expect(test_directives).to include('TEST_SOURCE_FILE("other.c")')
+    end
+
+    it 'extracts test directives from the directives-only output when fallback: false' do
+      directives_only_content = [
+        "# 1 \"#{filepath}\" 99999",
+        'TEST_SOURCE_FILE("other.c")',
+        'void test_ShouldDoSomething(void) {}'
+      ].join("\n")
+      stub_file_open('/build/directives_only/test_widget.c', directives_only_content, 'r')
+
+      contents, test_directives = subject.collect_test_file_contents(
+        test: 'test_widget', filepath: filepath, directives_only_filepath: '/build/directives_only/test_widget.c',
+        fallback: false, flags: [], defines: [], include_paths: []
+      )
+
+      expect(contents).to include('void test_ShouldDoSomething(void) {}')
+      expect(test_directives).to include('TEST_SOURCE_FILE("other.c")')
+    end
+
+  end
+
+end

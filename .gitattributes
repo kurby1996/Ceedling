@@ -1,0 +1,38 @@
+*                text=auto
+
+# These files are text and should be normalized (convert crlf to lf)
+*.rb             text
+*.test           text
+*.c              text
+*.cpp            text
+*.h              text
+*.txt            text
+*.yml            text
+*.s79            text
+*.bat            text
+*.xcl            text
+*.inc            text
+*.info           text
+*.md             text
+makefile         text
+rakefile         text
+bin/ceedling     text
+
+# Golden render fixtures are an exact byte-for-byte record of report output
+# captured from ERB before it was removed as a dependency. Line ending conversion
+# would rewrite the very bytes they exist to preserve, and the specs that read
+# them with binread would then compare against something nobody recorded.
+spec/support/fixtures/templates/*.txt  -text
+
+#These files are binary and should not be normalized
+*.doc            binary
+*.odt            binary
+*.pdf            binary
+*.ewd            binary
+*.eww            binary
+*.dni            binary
+*.wsdt           binary
+*.dbgdt          binary
+*.mac            binary
+*.cmd            binary
+assets/ceedling  binary

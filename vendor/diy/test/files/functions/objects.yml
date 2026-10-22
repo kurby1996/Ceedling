@@ -1,0 +1,31 @@
+# =========================================================================
+#   Vendored third-party source, under its own copyright and license.
+#   Not Ceedling code, and carries no Ceedling copyright banner.
+#
+#   DIY ⏩️ Atomic Object
+#   License ⏩️ vendor/diy/LICENSE.txt
+# =========================================================================
+
+
+thing_builder:
+
+method_extractor:
+  
+attached_things_builder:
+  
+method build_thing:
+    object: thing_builder
+    method: build
+    attach:
+    - attached_things_builder
+
+method build_default_thing:
+    object: thing_builder
+    method: build_default
+    attach:
+    - attached_things_builder
+    - things_builder
+    
+things_builder:
+  compose:
+    - build_thing

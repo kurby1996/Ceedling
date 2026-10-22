@@ -1,0 +1,652 @@
+# =========================================================================
+#   Ceedling - Test-Centered Build System for C
+#   ThrowTheSwitch.org
+#   Copyright (c) 2010-26 Mike Karlesky, Mark VanderVoord, & Greg Williams
+#   SPDX-License-Identifier: MIT
+# =========================================================================
+
+require_relative 'gcov_helpers'
+
+module GcovCommonTestCases
+  include GcovHelpers
+
+  # #1252 -- Enabling the gcov plugin must not make gcovr a hard dependency of every
+  # build. Deliberately does NOT call prep_project_yml_for_coverage (which conditionally
+  # strips :utilities ➡️ gcovr when the host lacks a real gcovr) -- the point here is
+  # gcovr enabled in config but genuinely unreachable, reproducing #1252 regardless of
+  # what's actually installed on the machine running this spec.
+  def project_with_gcov_enabled_test_all_does_not_require_gcovr
+    @c.with_context do
+      Dir.chdir @proj_name do
+        @c.uncomment_project_yml_option_for_test("- gcov")
+        # Default :gcov ↳ :utilities already includes gcovr and :reports already
+        # includes HtmlBasic -- exactly the enabled-but-unused shape #1252 reported.
+        @c.merge_project_yml_for_test(
+          { :tools => { :gcov_gcovr_report => { :executable => 'nonexistent_gcovr_binary_for_1252_test' } } }
+        )
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file_success.c"), 'test/'
+
+        # An ordinary test:all run must succeed -- it never needs gcovr at all.
+        output = @c.ceedling_build_exec("test:all")
+        expect(@c.last_exit_status).to eq(0)
+        expect(output).to_not match(/nonexistent_gcovr_binary_for_1252_test/)
+
+        # A real gcov: build still needs gcovr and must still fail loudly when it's missing --
+        # the fix defers gcovr's tool validation, it doesn't remove it.
+        output = @c.ceedling_build_exec("gcov:all")
+        expect(@c.last_exit_status).to_not eq(0)
+        expect(output).to match(/nonexistent_gcovr_binary_for_1252_test/)
+      end
+    end
+  end
+
+  def project_with_gcov_success
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file_success.c"), 'test/'
+
+        output = @c.ceedling_build_exec("gcov:all")
+        expect(@c.last_exit_status).to eq(0) # Since test cases either pass or are ignored, Ceedling exits with success
+        expect(output).to match(/TESTED:\s+\d/)
+        expect(output).to match(/PASSED:\s+\d/)
+        expect(output).to match(/FAILED:\s+\d/)
+        expect(output).to match(/IGNORED:\s+\d/)
+      end
+    end
+  end
+
+  def project_with_gcov_fail
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file.c"), 'test/'
+
+        output = @c.ceedling_build_exec("gcov:all")
+        expect(@c.last_exit_status).to eq(1) # Unit test failures => Ceedling exit code 1
+        expect(output).to match(/TESTED:\s+\d/)
+        expect(output).to match(/PASSED:\s+\d/)
+        expect(output).to match(/FAILED:\s+\d/)
+        expect(output).to match(/IGNORED:\s+\d/)
+      end
+    end
+  end
+
+  # gcovr's own --fail-under-decision is a no-op without --decisions also present --
+  # Ceedling supplies --decisions automatically whenever :fail_under_decision is
+  # configured, so a passing run reports success instead of gcovr's own opaque
+  # "need also option --decision" CLI error.
+  def project_with_gcov_fail_under_decision
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        @c.merge_project_yml_for_test( { :gcov => { :gcovr => { :fail_under_decision => 1 } } } )
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file_success.c"), 'test/'
+
+        output = @c.ceedling_build_exec("gcov:all")
+        expect(@c.last_exit_status).to eq(0)
+        expect(output).to_not match(/need also option --decision/)
+      end
+    end
+  end
+
+  # TODO: Restore this test when the :abort_on_uncovered option is restored in the Gcov plugin
+  # def project_with_gcov_fail_because_of_uncovered_files
+  #   @c.with_context do
+  #     Dir.chdir @proj_name do
+  #       prep_project_yml_for_coverage
+  #       add_gcov_option("abort_on_uncovered", "TRUE")
+  #       FileUtils.cp test_asset_path("example_file.h"), 'src/'
+  #       FileUtils.cp test_asset_path("example_file.c"), 'src/'
+  #       FileUtils.cp test_asset_path("uncovered_example_file.c"), 'src/'
+  #       FileUtils.cp test_asset_path("test_example_file_success.c"), 'test/'
+
+  #       output = `bundle exec ruby -S ceedling gcov:all 2>&1`
+  #       expect($?.exitstatus).to match(1) # Gcov causes Ceedlng to exit with error
+  #       expect(output).to match(/TESTED:\s+\d/)
+  #       expect(output).to match(/PASSED:\s+\d/)
+  #       expect(output).to match(/FAILED:\s+\d/)
+  #       expect(output).to match(/IGNORED:\s+\d/)
+  #     end
+  #   end
+  # end
+
+  # TODO: Restore this test when the :abort_on_uncovered option is restored in the Gcov plugin
+  # def project_with_gcov_success_because_of_ignore_uncovered_list
+  #   @c.with_context do
+  #     Dir.chdir @proj_name do
+  #       prep_project_yml_for_coverage
+  #       add_gcov_option("abort_on_uncovered", "TRUE")
+  #       add_gcov_section("uncovered_ignore_list", ["src/foo_file.c"])
+  #       FileUtils.cp test_asset_path("example_file.h"), "src/"
+  #       FileUtils.cp test_asset_path("example_file.c"), "src/"
+  #       # "src/foo_file.c" is in the ignore uncovered list
+  #       FileUtils.cp test_asset_path("uncovered_example_file.c"), "src/foo_file.c"
+  #       FileUtils.cp test_asset_path("test_example_file_success.c"), "test/"
+
+  #       output = `bundle exec ruby -S ceedling gcov:all 2>&1`
+  #       expect($?.exitstatus).to match(0)
+  #       expect(output).to match(/TESTED:\s+\d/)
+  #       expect(output).to match(/PASSED:\s+\d/)
+  #       expect(output).to match(/FAILED:\s+\d/)
+  #       expect(output).to match(/IGNORED:\s+\d/)
+  #     end
+  #   end
+  # end
+
+  # TODO: Restore this test when the :abort_on_uncovered option is restored in the Gcov plugin
+  # def project_with_gcov_success_because_of_ignore_uncovered_list_with_globs
+  #   @c.with_context do
+  #     Dir.chdir @proj_name do
+  #       prep_project_yml_for_coverage
+  #       add_gcov_option("abort_on_uncovered", "TRUE")
+  #       add_gcov_section("uncovered_ignore_list", ["src/B/**"])
+  #       FileUtils.mkdir_p(["src/A", "src/B/C"])
+  #       FileUtils.cp test_asset_path("example_file.h"), "src/A"
+  #       FileUtils.cp test_asset_path("example_file.c"), "src/A"
+  #       # "src/B/**" is in the ignore uncovered list
+  #       FileUtils.cp test_asset_path("uncovered_example_file.c"), "src/B/C/foo_file.c"
+  #       FileUtils.cp test_asset_path("test_example_file_success.c"), "test/"
+
+  #       output = `bundle exec ruby -S ceedling gcov:all 2>&1`
+  #       expect($?.exitstatus).to match(1) # Unit test failures => Ceedling exit code 1
+  #       expect(output).to match(/TESTED:\s+\d/)
+  #       expect(output).to match(/PASSED:\s+\d/)
+  #       expect(output).to match(/FAILED:\s+\d/)
+  #       expect(output).to match(/IGNORED:\s+\d/)
+  #     end
+  #   end
+  # end
+
+  def project_with_gcov_compile_error
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_nosanitize_boom.c"), 'test/'
+
+        output = @c.ceedling_build_exec("gcov:all")
+        expect(@c.last_exit_status).to eq(1) # Since a test explodes, Ceedling exits with error
+        expect(output).to match(/(?:ERROR: Ceedling Failed)|(?:Ceedling could not complete operations because of errors)/)
+      end
+    end
+  end
+
+  def help_tasks_include_gcov
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        output = @c.ceedling_appcmd_exec("help")
+        expect(@c.last_exit_status).to eq(0)
+        expect(output).to match(/ceedling gcov:\*/i)
+        expect(output).to match(/ceedling gcov:all/i)
+      end
+    end
+  end
+
+  def create_html_report
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file_success.c"), 'test/'
+
+        output = @c.ceedling_build_exec("gcov:all")
+        if @gcov_reports.include? :gcovr
+          expect(output).to match(/Generating HTML coverage report in 'build\/artifacts\/gcov\/gcovr\/'\.\.\./)
+          expect(File.exist?('build/artifacts/gcov/gcovr/GcovCoverageResults.html')).to eq true
+        end
+        if @gcov_reports.include? :reportgenerator
+          expect(output).to match(/Generating HtmlBasic coverage report in 'build\/artifacts\/gcov\/ReportGenerator\/'\.\.\./)
+          expect(File.exist?('build/artifacts/gcov/ReportGenerator/summary.htm')).to eq true
+        end
+      end
+    end
+  end
+
+  def gcov_console_report_with_system_header
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        FileUtils.cp test_asset_path("example_file_with_stdio.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file_with_stdio.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file_with_stdio.c"), 'test/'
+
+        output = @c.ceedling_build_exec("gcov:all")
+        expect(@c.last_exit_status).to eq(0)
+        # Console summary must report coverage for the source file, not a warning.
+        # When <stdio.h> is included, gcov may list a system header (e.g. _stdio.h)
+        # as the first File entry — the fix ensures the correct source is found.
+        expect(output).to match(/example_file_with_stdio\.c \| Lines executed:/)
+        expect(output).not_to match(/Found no coverage results for.*example_file_with_stdio/)
+      end
+    end
+  end
+
+  def gcov_console_report_with_partial
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+
+        asset_base = test_asset_path("tests_with_fallback_conditionals")
+        FileUtils.cp "#{asset_base}/src/conditional_module.h", 'src/'
+        FileUtils.cp "#{asset_base}/src/conditional_module.c", 'src/'
+        FileUtils.cp "#{asset_base}/src/optional_dep.h",       'src/'
+        FileUtils.cp "#{asset_base}/test/test_conditionals.c", 'test/'
+
+        @c.merge_project_yml_for_test({ :project => { :use_partials => true } })
+
+        output = @c.ceedling_build_exec("gcov:all")
+        expect(@c.last_exit_status).to eq(0)
+        # Coverage must be reported for the Partial (gcov references the original
+        # module via #line remapping); no spurious "Found no coverage results" warning.
+        expect(output).to match(/Lines executed:/)
+        expect(output).not_to match(/Found no coverage results for.*conditional_module/)
+      end
+    end
+  end
+
+  # Modified condition/decision coverage is gated twice, and both gates raise: gcovr must
+  # support reporting it and GCC must support emitting it. That is why no system test
+  # covered it before -- it cannot run on most toolchains, and ungated it would simply fail
+  # there. The group including this case requires both versions, so reaching a successful
+  # build is itself the assertion that both halves agreed.
+  def project_with_gcov_mcdc_coverage
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        @c.merge_project_yml_for_test( { :gcov => { :mcdc => true } } )
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file_success.c"), 'test/'
+
+        output = @c.ceedling_build_exec("gcov:all --verbosity=obnoxious")
+
+        expect(@c.last_exit_status).to eq(0)
+
+        # GCC emits the condition data; a build without this flag never produced any.
+        expect(output).to match(/-fcondition-coverage/)
+      end
+    end
+  end
+
+  # Guards the quiet half of the plugin's version handling. A `:min_version` arg-table
+  # entry is dropped silently below its minimum, so a build still succeeds with the feature
+  # simply absent. Asserting the flag on the command line is what distinguishes "the
+  # feature ran" from "the build did not complain" -- the group including this case
+  # requires the gcovr version that supports it, so an absent flag is a real defect here
+  # rather than an older toolchain.
+  def gcovr_merge_mode_functions_reaches_the_command_line
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file_success.c"), 'test/'
+
+        output = @c.ceedling_build_exec("gcov:all --verbosity=obnoxious")
+
+        expect(@c.last_exit_status).to eq(0)
+
+        if @gcov_reports.include? :gcovr
+          expect(output).to match(/--merge-mode-functions/)
+        end
+      end
+    end
+  end
+
+  def create_html_report_with_gcovr_config_file_overrides_default
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file_success.c"), 'test/'
+
+        # A second test file covering the same source creates duplicate function
+        # coverage entries: Ceedling builds one executable per test file, and both
+        # link against example_file.c, producing two sets of .gcda coverage data
+        # for the same functions.
+        FileUtils.cp test_asset_path("test_example_file_2.c"), 'test/'
+
+        # 'strict' causes gcovr to exit non-zero when the same function appears in
+        # multiple test executables' coverage data. Ceedling's default is
+        # 'merge-use-line-max' (set in defaults.yml), which it injects as a CLI
+        # arg that would override this config file setting without the fix.
+        File.write('gcovr.cfg', [
+          "[gcovr]",
+          "merge-mode-functions = strict"
+        ].join("\n"))
+
+        @c.merge_project_yml_for_test({
+          :gcov => {
+            :gcovr => {
+              :config_file => 'gcovr.cfg'
+            }
+          }
+        })
+
+        output = @c.ceedling_build_exec("gcov:all --verbosity=obnoxious")
+        if @gcov_reports.include? :gcovr
+          # The config file's strict mode exits non-zero on duplicate functions. A Ceedling
+          # command line overriding the config file would exit 0 under merge-use-line-max.
+          expect(@c.last_exit_status).not_to eq(0)
+
+          # No `--exclude` should appear on the gcovr command line when a config file is in use.
+          expect(output).not_to match(/--exclude/)
+        end
+      end
+    end
+  end
+
+  # #1159 -- :custom_args: is the escape hatch for whatever gcovr flag Ceedling has no
+  # named option for (the issue's own request: limiting gcovr's search root). Also
+  # confirms it still applies alongside a :config_file: (unlike every other :gcovr:
+  # option, which config_file_in_use? defers to the file instead) -- it's meant to
+  # keep working right alongside a config file, not be silently dropped by it.
+  # A JaCoCo report names the JaCoCo report DTD and has a <report> root element
+  def create_gcovr_jacoco_report
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file_success.c"), 'test/'
+        @c.merge_project_yml_for_test( { :gcov => { :reports => ['JaCoCo'], :gcovr => { :jacoco_pretty => true } } } )
+
+        output = @c.ceedling_build_exec("gcov:all")
+
+        expect(@c.last_exit_status).to eq(0)
+        expect(output).to match(/Generating JaCoCo XML coverage report in 'build\/artifacts\/gcov\/gcovr\/'\.\.\./)
+
+        report = File.read('build/artifacts/gcov/gcovr/GcovCoverageJaCoCo.xml')
+        expect(report).to match(%r{<!DOCTYPE \w+ SYSTEM 'https://www\.jacoco\.org/.+/report\.dtd'>})
+        expect(report).to match(/<report\b[^>]*>/)
+        expect(report).to include('example_file.c')
+      end
+    end
+  end
+
+  # An LCOV info file records each source file between SF: and end_of_record, under its test name
+  def create_gcovr_lcov_report
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file_success.c"), 'test/'
+        @c.merge_project_yml_for_test( { :gcov => { :reports => ['lcov'], :gcovr => { :lcov_test_name => 'ceedling_suite' } } } )
+
+        output = @c.ceedling_build_exec("gcov:all")
+
+        expect(@c.last_exit_status).to eq(0)
+        expect(output).to match(/Generating LCOV coverage report in 'build\/artifacts\/gcov\/gcovr\/'\.\.\./)
+
+        report = File.read('build/artifacts/gcov/gcovr/GcovCoverage.lcov')
+        expect(report).to include('TN:ceedling_suite')
+        expect(report).to match(/^SF:.*example_file\.c$/)
+        expect(report).to include('end_of_record')
+      end
+    end
+  end
+
+  def create_html_report_with_gcovr_custom_args
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file_success.c"), 'test/'
+
+        # gcovr's own config file format is flat `key = value` -- no `[section]`
+        # header (confirmed against the real tool; a `[gcovr]` header, despite
+        # appearing in some older examples elsewhere, is invalid and gcovr rejects
+        # it outright).
+        File.write('gcovr.cfg', "merge-mode-functions = merge-use-line-max\n")
+
+        @c.merge_project_yml_for_test({
+          :gcov => {
+            :gcovr => {
+              :config_file => 'gcovr.cfg',
+              :custom_args => ['--gcov-executable', 'gcov']
+            }
+          }
+        })
+
+        output = @c.ceedling_build_exec("gcov:all --verbosity=obnoxious")
+        if @gcov_reports.include? :gcovr
+          expect(@c.last_exit_status).to eq(0)
+          # Custom arg appears on the actual invoked gcovr command line, even
+          # though a :config_file: is also in use.
+          expect(output).to match(/"--gcov-executable" "gcov"/)
+        end
+      end
+    end
+  end
+
+  def create_html_report_from_crashing_test_with_backtrace_enabled
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_nosanitize_crash_sigsegv.c"), 'test/'
+
+        @c.merge_project_yml_for_test({:project => { :use_backtrace => :gdb }})
+
+        output = @c.ceedling_build_exec("gcov:all")
+        expect(@c.last_exit_status).to eq(1) # Ceedling should exit with error because of failed test due to crash
+        expect(output).to match(/crashed/i)
+        expect(output).to match(/Unit test failures/)
+        expect(File.exist?('./build/gcov/results/test_nosanitize_crash_sigsegv.fail'))
+        output_rd = read_spec_file('./build/gcov/results/test_nosanitize_crash_sigsegv.fail')
+        expect(output_rd =~ /test_add_numbers_will_fail \(\) at test\/test_nosanitize_crash_sigsegv.c\:\d+/ )
+        expect(output).to match(/TESTED:\s+2/)
+        expect(output).to match(/PASSED:\s+(?:0|1)/)
+        expect(output).to match(/FAILED:\s+(?:1|2)/)
+        expect(output).to match(/IGNORED:\s+0/)
+        expect(output).to match(/example_file.c \| Lines executed:5?0.00% of 4/)
+        if @gcov_reports.include? :gcovr
+          expect(output).to match(/Generating HTML coverage report in 'build\/artifacts\/gcov\/gcovr\/'\.\.\./)
+          expect(File.exist?('build/artifacts/gcov/gcovr/GcovCoverageResults.html')).to eq true
+        end
+        if @gcov_reports.include? :reportgenerator
+          expect(output).to match(/Generating HtmlBasic coverage report in 'build\/artifacts\/gcov\/ReportGenerator\/'\.\.\./)
+          expect(File.exist?('build/artifacts/gcov/ReportGenerator/summary.htm')).to eq true
+        end
+      end
+    end
+  end
+
+  def create_html_report_with_zero_coverage_after_crashing_test_and_backtrace
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_nosanitize_crash_sigsegv.c"), 'test/'
+
+        @c.merge_project_yml_for_test({:project => { :use_backtrace => :gdb }})
+
+        output = @c.ceedling_build_exec("gcov:all --exclude_test_case=test_add_numbers_adds_numbers")
+        expect(@c.last_exit_status).to eq(1) # Ceedling should exit with error because of failed test due to crash
+        expect(output).to match(/Test Case Crashed/i)
+        expect(output).to match(/Unit test failures/)
+        expect(File.exist?('./build/gcov/results/test_nosanitize_crash_sigsegv.fail'))
+        output_rd = read_spec_file('./build/gcov/results/test_nosanitize_crash_sigsegv.fail')
+        expect(output_rd =~ /test_add_numbers_will_fail \(\) at test\/test_nosanitize_crash_sigsegv.c\:\d+/ )
+        expect(output).to match(/TESTED:\s+1/)
+        expect(output).to match(/PASSED:\s+0/)
+        expect(output).to match(/FAILED:\s+1/)
+        expect(output).to match(/IGNORED:\s+0/)
+        expect(output).to match(/example_file.c \| Lines executed:0.00% of 4/)
+
+        if @gcov_reports.include? :gcovr
+          expect(output).to match(/Generating HTML coverage report in 'build\/artifacts\/gcov\/gcovr\/'\.\.\./)
+          expect(File.exist?('build/artifacts/gcov/gcovr/GcovCoverageResults.html')).to eq true
+        end
+        if @gcov_reports.include? :reportgenerator
+          expect(output).to match(/Generating HtmlBasic coverage report in 'build\/artifacts\/gcov\/ReportGenerator\/'\.\.\./)
+          expect(File.exist?('build/artifacts/gcov/ReportGenerator/summary.htm')).to eq true
+        end
+      end
+    end
+  end
+
+  def create_html_report_100_coverage_excluding_crashing_test_case
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_nosanitize_crash_sigsegv.c"), 'test/'
+
+        add_test_case = "\nvoid test_difference_between_two_numbers(void)\n"\
+                        "{\n" \
+                        "  TEST_ASSERT_EQUAL_INT(0, difference_between_numbers(1,1));\n" \
+                        "}\n"
+
+        updated_test_file = read_spec_file('test/test_nosanitize_crash_sigsegv.c').split("\n")
+        updated_test_file.insert(updated_test_file.length(), add_test_case)
+        File.write('test/test_nosanitize_crash_sigsegv.c', updated_test_file.join("\n"), mode: 'w')
+
+        output = @c.ceedling_build_exec("gcov:all --exclude_test_case=test_add_numbers_will_fail")
+        expect(@c.last_exit_status).to eq(0)
+        expect(File.exist?('./build/gcov/results/test_nosanitize_crash_sigsegv.pass'))
+        expect(output).to match(/TESTED:\s+2/)
+        expect(output).to match(/PASSED:\s+2/)
+        expect(output).to match(/FAILED:\s+0/)
+        expect(output).to match(/IGNORED:\s+0/)
+        expect(output).to match(/example_file.c \| Lines executed:100.00% of 4/)
+
+        if @gcov_reports.include? :gcovr
+          expect(output).to match(/Generating HTML coverage report in 'build\/artifacts\/gcov\/gcovr\/'\.\.\./)
+          expect(File.exist?('build/artifacts/gcov/gcovr/GcovCoverageResults.html')).to eq true
+        end
+        if @gcov_reports.include? :reportgenerator
+          expect(output).to match(/Generating HtmlBasic coverage report in 'build\/artifacts\/gcov\/ReportGenerator\/'\.\.\./)
+          expect(File.exist?('build/artifacts/gcov/ReportGenerator/summary.htm')).to eq true
+        end
+      end
+    end
+  end
+
+  def project_with_gcov_untested_sources_ignore
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        add_gcov_option("untested_sources", ":ignore")
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file_success.c"), 'test/'
+        # Untested — no test references this source file.
+        FileUtils.cp test_asset_path("uncovered_example_file.c"), 'src/'
+
+        output = @c.ceedling_build_exec("gcov:all")
+        expect(@c.last_exit_status).to eq(0)
+        expect(output).not_to match(/Untested Source Files/)
+        expect(output).not_to match(/Processing Untested Sources/)
+        expect(output).not_to match(/uncovered_example_file/)
+      end
+    end
+  end
+
+  def project_with_gcov_untested_sources_list
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        add_gcov_option("untested_sources", ":list")
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file_success.c"), 'test/'
+        # Untested — no test references this source file.
+        FileUtils.cp test_asset_path("uncovered_example_file.c"), 'src/'
+
+        output = @c.ceedling_build_exec("gcov:all")
+        expect(@c.last_exit_status).to eq(0)
+        # Immediate warning-level filepath listing (no compilation attempted).
+        expect(output).to match(/Untested.+not.+coverage report/)
+        expect(output).to match(/uncovered_example_file\.c/)
+        expect(output).not_to match(/Compiling with coverage.*uncovered_example_file/)
+        # Post-build console summary still lists it (basename-keyed).
+        expect(output).to match(/Untested Source Files/)
+        expect(output).to match(/uncovered_example_file\.c \| No tests executed: 0% coverage/)
+      end
+    end
+  end
+
+  def project_with_gcov_untested_sources_compile_failure
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        add_gcov_option("untested_sources", ":compile")
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file_success.c"), 'test/'
+
+        # Untested source with a syntax error — fails to compile regardless of
+        # any :defines/:flags, deliberately triggering the guidance notice.
+        FileUtils.cp test_asset_path("broken_uncovered_file.c"), 'src/'
+
+        output = @c.ceedling_build_exec("gcov:all")
+        expect(@c.last_exit_status).not_to eq(0) # Fail-fast: compile failure fails the build
+        expect(output).to match(/Compiling.+with coverage failed/)
+        expect(output).to match(/:untested_sources.*:compile/)
+        # Avoid unicode character matching in log matching, since some shells may not support them.
+        expect(output).to match(/Switch :gcov.+:untested_sources to :list/)
+        expect(output).to match(/Switch :gcov.+:untested_sources to :ignore/)
+      end
+    end
+  end
+
+  # An untested source's defines resolve as a tested source's do, so a :gcov matcher naming
+  # the source supplies what it needs to compile
+  def project_with_gcov_untested_sources_compiled_with_matched_defines
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        add_gcov_option("untested_sources", ":compile")
+        @c.merge_project_yml_for_test( { :defines => { :gcov => { 'needs_define' => ['UNTESTED_SOURCE_REQUIRED'] } } } )
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file_success.c"), 'test/'
+        File.write( 'src/needs_define.c', "#ifndef UNTESTED_SOURCE_REQUIRED\n#error UNTESTED_SOURCE_REQUIRED is not defined\n#endif\nint needs_define(void) { return 1; }\n" )
+
+        output = @c.ceedling_build_exec("gcov:untested_sources")
+        expect(@c.last_exit_status).to eq(0), output
+        expect(File.exist?('build/gcov/out/needs_define.o')).to eq true
+      end
+    end
+  end
+
+  def project_with_gcov_untested_sources_standalone_task
+    @c.with_context do
+      Dir.chdir @proj_name do
+        prep_project_yml_for_coverage
+        add_gcov_option("untested_sources", ":compile")
+        FileUtils.cp test_asset_path("example_file.h"), 'src/'
+        FileUtils.cp test_asset_path("example_file.c"), 'src/'
+        FileUtils.cp test_asset_path("test_example_file_success.c"), 'test/'
+        # Untested — no test references this source file.
+        FileUtils.cp test_asset_path("uncovered_example_file.c"), 'src/'
+
+        # Run the standalone task directly — no prior `gcov:all` in this invocation,
+        # so no test fixture is ever built or executed.
+        output = @c.ceedling_build_exec("gcov:untested_sources")
+        expect(@c.last_exit_status).to eq(0)
+        expect(output).not_to match(/TESTED:\s+\d/) # No test build/run occurred
+        expect(File.exist?('build/gcov/out/uncovered_example_file.o')).to eq true
+      end
+    end
+  end
+end

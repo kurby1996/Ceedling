@@ -1,0 +1,284 @@
+# Ceedling Plugins
+
+Ceedling includes a number of built-in plugins. Each plugin linked below
+includes full documentation of its capabilities and configuration options.
+
+!!! tip "Need a CI test build report?"
+    [Test Suite Report Log Factory](report-tests-log-factory.md) provides
+    a handful of popular reports and the ability to create your own.
+
+!!! tip "Have custom needs?"
+    Many find the handy-dandy [Command Hooks plugin](command-hooks.md)
+    is often enough as it allows you to connect your own scripts and tools 
+    to Ceedling build steps. Alternatively, you can 
+    [create your own plugins](../development/plugins/index.md).
+
+See the [`:plugins` configuration reference](../configuration/reference/plugins.md) 
+for how to enable built-in plugins and load custom plugins in your project.
+
+---
+
+## Understanding plugin build duplication
+
+!!! warning
+    Build-related plugins intentionally execute duplicated builds.
+
+Plugins including [Gcov](gcov/index.md), [Bullseye](bullseye/index.md), [Valgrind](valgrind.md),
+and [Sanitize](sanitize.md) recreate test build tasks. That is, the command line build task
+`test:foo` also exists as `gcov:foo`, `bullseye:foo`, `valgrind:foo`, and/or `sanitize:foo`
+if these plugins are enabled. Each of these triggers a full rebuild of the named test with 
+instrumentation activated. **This duplication is intentional and very necessary.**
+
+These plugins modify executable code or the environment in which a test suite 
+executable runs. Duplicating and segregating the build tasks addresses several 
+important issues:
+
+1. **Conflicting interactions**. Enabling multiple plugins without 
+   duplicated tasks (i.e. integrated build tasks) can bring about conflicts and
+   undefined behavior. For instance, Gcov’s instrumentation does not
+   necessarily play nice with Valgrind’s memory-instrumented emulation
+   runtime, and the two should be kept entirely segregated. Likewise, a
+   sanitizer-instrumented test executable cannot run under Valgrind at all.
+2. **Unforeseen effects**. These plugins can directly alter the functioning of
+   the code under test. For instance, coverage instrumentation inserted into
+   your compiled code can alter its function or timing. As such, it is vital
+   to maintain distinct builds to compare them. Your vanilla test suite build
+   may function slightly differently than the coverage-instrumented build.
+3. **Optional instrumentation**. The `<plugin>:` command line task convention
+   also provides a very simple opt-in scheme. Plugins automatically enabled 
+   for every build drives the desire to optional disable them. Valgrind testing
+   can require 25-50x the execution time of a test suite, and you likely will
+   want the option to easily disable it. While Ceedling could certainly provide
+   that option at the command line for otherwise always-on plugins, this
+   plugin task namespacing scheme naturally accomplished this along with the
+   needs of (1) and (2).
+
+!!! note
+    A duplicated build task is a [delta build](../getting-started/builds.md).
+    Ceedling skips unneeded work in a `gcov:`, `bullseye:`, `valgrind:`, or
+    `sanitize:` build in the same way it does in a standard `test:` build.
+
+Each of these plugins maintains its own separate delta build cache, apart from
+plain test builds and from each other. A file with no role specific to a
+given plugin will still be rebuilt the first you run that plugin’s build.
+This happens because each build tracks state in its own dependency cache, 
+not because of the file itself.
+
+---
+
+## Directory
+
+### Console Test Results
+
+<div class="grid cards" markdown>
+
+-   :material-monitor-screenshot: **[`report_tests_pretty_stdout`](report-tests-pretty-stdout.md)**
+
+    ---
+
+    The default plugin for printing test results to the console. Produces a
+    well-formatted list of summary statistics, ignored and failed tests, and
+    any extraneous output collected from test fixtures.
+
+-   :material-monitor-screenshot: **[`report_tests_ide_stdout`](report-tests-ide-stdout.md)**
+
+    ---
+
+    Lists failed and ignored tests in the shape of GCC diagnostics, which
+    Eclipse CDT, VS Code, CLion, and other IDEs read as problems that link to
+    each test.
+
+-   :material-monitor-screenshot: **[`report_tests_gtestlike_stdout`](report-tests-gtestlike-stdout.md)**
+
+    ---
+
+    Prints test results to the console in a format that mimics
+    [Google Test’s output][gtest-sample-output] — both human readable and 
+    recognized by a variety of reporting tools, IDEs, and CI servers.
+
+-   :material-monitor-screenshot: **[`report_tests_teamcity_stdout`](report-tests-teamcity-stdout.md)**
+
+    ---
+
+    Processes test results into [TeamCity] service messages printed to the
+    console, allowing the CI server to extract build steps and test results
+    from software builds.
+
+</div>
+
+### Test Results Reports
+
+<div class="grid cards" markdown>
+
+-   :material-file-chart: **[`report_tests_log_factory`](report-tests-log-factory.md)**
+
+    ---
+
+    Produces any or all of four useful test suite reports in JSON, JUnit XML,
+    CppUnit XML, or HTML format. Also provides a mechanism for custom reports 
+    with a small amount of Ruby rather than a full plugin.
+
+-   :material-file-chart: **[`report_tests_raw_output_log`](report-tests-raw-output-log.md)**
+
+    ---
+
+    Captures extraneous console output generated by test executables —
+    typically for debugging — to log files named after the test executables.
+
+-   :material-file-chart: **[`report_build_warnings_log`](report-build-warnings-log.md)**
+
+    ---
+
+    Scans the output of build tools for console warning notices and collects
+    them in a simple text file and optional SARIF and JSON reports.
+
+</div>
+
+### Static & Dynamic Analysis
+
+!!! tip "Ceedling includes integrated `gdb` support"
+    Tracking down weird test failures can require multiple approaches and tools. 
+    Diagnosing a bug causing a test executable crash can benefit from either or 
+    both of these plugins plus Ceedling’s 
+    [backtrace feature](../configuration/reference/project.md#use_backtrace).
+
+<div class="grid cards" markdown>
+
+-   :material-file-check: **[`cppcheck`](cppcheck.md)**
+
+    ---
+
+    Adds Ceedling tasks to execute static analysis with [Cppcheck]. Cppcheck helps
+    find bugs related to undefined behavior, dangerous code patterns, and
+    coding style. Cppcheck is even able to analyze non-standard syntax C/C++ code, 
+    as is common in embedded projects. The plugin can produce various reports.
+
+-   :material-memory: **[`valgrind`](valgrind.md)**
+
+    ---
+
+    Adds Ceedling tasks to run test executables under [Valgrind] memory error
+    detection. Valgrind catches memory leaks, invalid accesses, and use-after-free
+    bugs. The plugin produces per-test log files in the build artifacts directory.
+
+-   :material-shield-bug: **[`sanitize`](sanitize.md)**
+
+    ---
+
+    Adds Ceedling tasks to build and run test executables with the compiler’s
+    sanitizers. ASan, UBSan, and LeakSanitizer find memory errors, undefined
+    behavior, and leaks as tests run. Findings fail the build and can be written
+    as text, JSON, and SARIF reports.
+
+</div>
+
+### Code Coverage
+
+<div class="grid cards" markdown>
+
+-   :material-percent: **[`gcov`](gcov/index.md)**
+
+    ---
+
+    Adds Ceedling tasks to execute tests with GNU code coverage
+    instrumentation. Manages use of [gcov], optional Python-based [GCovr],
+    and .Net-based [ReportGenerator] to produce coverage reports in a
+    variety of formats.
+
+-   :material-percent: **[`bullseye`](bullseye/index.md)**
+
+    ---
+
+    Adds Ceedling tasks to execute tests with code coverage instrumentation
+    provided by the commercial [Bullseye] tool, which provides visualization
+    and report generation from the coverage results.
+
+    Note: Bullseye requires a commercial license. It was disabled as of 1.0.0
+    and is enabled again as of 1.2.0.
+
+</div>
+
+### Mocking & Test Doubles
+
+<div class="grid cards" markdown>
+
+-   :material-ghost: **[`fff`](fff.md)**
+
+    ---
+
+    Replaces Ceedling’s CMock-based mock generation with the
+    [Fake Function Framework][FFF] — an alternative approach to
+    [test doubles][test-doubles] using simple fake functions.
+
+<!--Spacer so the single fff card does not stretch across multiple grid columns-->
+<div style="visibility:hidden"></div>
+
+</div>
+
+### Build Integration
+
+<div class="grid cards" markdown>
+
+-   :material-script-text-play: **[`command_hooks`](command-hooks.md)**
+
+    ---
+
+    Connects Ceedling’s build events to tool entries you define. Easily 
+    attach your own scripts or command line utilities to build steps 
+    without writing a full custom plugin.
+
+-   :material-database: **[`compile_commands_json_db`](compile-commands-json-db.md)**
+
+    ---
+
+    Creates a [JSON Compilation Database][json-compilation-database] — a
+    `compile_commands.json` file useful to any editor or IDE that implements
+    [`clangd`][clangd] Language Server Protocol support.
+
+-   :material-bell-ring: **[`beep`](beep.md)**
+
+    ---
+
+    Provides a simple audio notification when a test build completes suite
+    execution or fails due to a build error, intended to support developers
+    running time-consuming test suites locally in the background.
+
+</div>
+
+### Project & Release Builds
+
+<div class="grid cards" markdown>
+
+-   :material-package-variant-closed: **[`module_generator`](module-generator.md)**
+
+    ---
+
+    Save time in Test-Driven Development by generating a templated triplet
+    of source file, header file, and test file — scaffolded such that they
+    refer to one another — with a variety of options through command line tasks.
+
+-   :material-package-variant-closed: **[`dependencies`](dependencies.md)**
+
+    ---
+
+    Manages release build dependencies (e.g. static libraries or built tools)
+    including fetching dependencies, calling a dependency’s build process, 
+    and deploying resulting executables and dynamic libraries.
+
+</div>
+
+[gtest-sample-output]: https://subscription.packtpub.com/book/programming/9781800208988/11/ch11lvl1sec31/controlling-output-with-google-test
+[TeamCity]: https://jetbrains.com/teamcity
+[Cppcheck]: https://cppcheck.sourceforge.io
+[Valgrind]: https://valgrind.org
+[gcov]: http://gcc.gnu.org/onlinedocs/gcc/Gcov.html
+[GCovr]: https://www.gcovr.com/
+[ReportGenerator]: https://reportgenerator.io
+[Bullseye]: http://www.bullseye.com
+[FFF]: https://github.com/meekrosoft/fff
+[test-doubles]: https://blog.pragmatists.com/test-doubles-fakes-mocks-and-stubs-1a7491dfa3da
+[json-compilation-database]: https://clang.llvm.org/docs/JSONCompilationDatabase.html
+[clangd]: https://clangd.llvm.org
+[IDEs]: https://www.throwtheswitch.org/ide
+
+<br/><br/>

@@ -1,0 +1,255 @@
+# =========================================================================
+#   Ceedling - Test-Centered Build System for C
+#   ThrowTheSwitch.org
+#   Copyright (c) 2010-26 Mike Karlesky, Mark VanderVoord, & Greg Williams
+#   SPDX-License-Identifier: MIT
+# =========================================================================
+
+# Logging verbosity levels
+class Verbosity
+  SILENT      = 0   # As silent as possible (though there are some messages that must be spit out)
+  ERRORS      = 1   # Only errors
+  COMPLAIN    = 2   # Spit out errors and warnings/notices
+  NORMAL      = 3   # Errors, warnings/notices, standard status messages
+  OBNOXIOUS   = 4   # All messages including extra verbose output (used for lite debugging / verification)
+  DEBUG       = 5   # Special extra verbose output for hardcore debugging
+end
+
+VERBOSITY_OPTIONS = { 
+  :silent    => Verbosity::SILENT,
+  :errors    => Verbosity::ERRORS,
+  :warnings  => Verbosity::COMPLAIN,
+  :normal    => Verbosity::NORMAL,
+  :obnoxious => Verbosity::OBNOXIOUS,
+  :debug     => Verbosity::DEBUG,
+}.freeze()
+
+# Label + decorator options for logging
+class LogLabels
+  NONE          =  0  # Override logic and settings with no label and no decoration
+  AUTO          =  1  # Default labeling and decorators
+  NOTICE        =  2  # decorator + 'NOTICE:'
+  WARNING       =  3  # decorator + 'WARNING:'
+  ERROR         =  4  # decorator + 'ERROR:'
+  EXCEPTION     =  5  # decorator + 'EXCEPTION:'
+  CONSTRUCT     =  6  # decorator only
+  RUN           =  7  # decorator only
+  CRASH         =  8  # decorator only
+  PASS          =  9  # decorator only
+  FAIL          = 10  # decorator only
+  TITLE         = 11  # decorator only
+  DOCUMENTATION = 12  # decorator only
+  COMMERCIAL    = 13  # decorator only
+  REQUEST       = 14  # decorator only
+  BUILT         = 15  # decorator only
+
+  # Verbosity levels ERRORS – DEBUG default to certain labels or lack thereof
+  # The above label constants are available to override Loginator's default AUTO level as needed
+  # See Loginator comments
+end
+
+class DurationCounts
+  DAY_MS     = (24 * 60 * 60 * 1000)
+  HOUR_MS    =      (60 * 60 * 1000)
+  MINUTE_MS  =           (60 * 1000)
+  SECOND_MS  =                (1000)
+end
+
+class TestResultsSanityChecks
+  NONE      = 0  # no sanity checking of test results
+  NORMAL    = 1  # perform non-problematic checks
+  THOROUGH  = 2  # perform checks that require inside knowledge of system workings
+end
+
+class StdErrRedirect
+  NONE = :none
+  AUTO = :auto
+  WIN  = :win
+  UNIX = :unix
+  TCSH = :tcsh
+end
+
+EXTENSION_WIN_EXE     = '.exe'
+EXTENSION_NONWIN_EXE  = '.out'
+
+# Vendor frameworks, generated mocks, generated runners are always .c files
+EXTENSION_CORE_HEADER = '.h'
+EXTENSION_CORE_SOURCE = '.c'
+
+# Ceedling's own internal cache files are always .yml, independent of a project's
+# configurable :extension ↳ :yaml setting (which governs files a project author
+# might actually want to name differently, not Ceedling's own bookkeeping).
+EXTENSION_CORE_YAML = '.yml'
+
+CEEDLING_HEADER_FILENAME = 'ceedling.h'
+CEEDLING_HEADER_FILEPATH = CEEDLING_HEADER_FILENAME # lib/ceedling/
+PARTIAL_FILENAME_PREFIX  = 'ceedling_partial_'
+# One suffix per kind of file generated for a Partialized module. The builders that append
+# these and the reverse that strips one share this single definition, so neither can drift
+# from the other. No suffix is a suffix of another, so a generated name ends in exactly one.
+PARTIAL_SUFFIX_INTERFACE = '_interface'
+PARTIAL_SUFFIX_TYPES     = '_types'
+PARTIAL_SUFFIX_IMPL      = '_impl'
+PARTIAL_FILENAME_SUFFIXES = [
+  PARTIAL_SUFFIX_INTERFACE,
+  PARTIAL_SUFFIX_TYPES,
+  PARTIAL_SUFFIX_IMPL
+].freeze
+
+class PATTERNS
+  # #104 -- `[`/`]` deliberately excluded: they're legal filename characters
+  # (common on Windows especially) but never a documented Ceedling glob feature
+  # (unlike `*`/`?`/`{`/`}`, Ceedling's own real wildcard syntax) -- including them
+  # here meant a literal bracket in a real directory name was silently treated as
+  # "where the glob starts," truncating path validation to the wrong ancestor
+  # directory. See FilePathUtils.no_decorators, this regex's one consumer.
+  GLOB = /[\*\?\{\}]/
+
+  RUBY_STRING_REPLACEMENT = /#\{.+\}/
+  TOOL_EXECUTOR_ARGUMENT_REPLACEMENT = /(\$\{(\d+)\})/
+
+  TEST_STDOUT_STATISTICS  = /\n-+\s*(\d+)\s+Tests\s+(\d+)\s+Failures\s+(\d+)\s+Ignored\s+(OK|FAIL)\s*/i
+
+  USER_INCLUDE_DIRECTIVE_FILENAME = /#\s*include\s+\"\s*([\/\w\.\-]+)\s*\"/
+  SYSTEM_INCLUDE_DIRECTIVE_FILENAME = /#\s*include\s+<\s*([\/\w\.\-]+)\s*>/
+
+  TEST_SOURCE_FILE  = /TEST_SOURCE_FILE\s*\(\s*\"\s*([^"]+)\s*\"\s*\)/
+  TEST_INCLUDE_PATH = /TEST_INCLUDE_PATH\s*\(\s*\"\s*([^"]+)\s*\"\s*\)/
+
+  # Unity's TEST_CASE()/TEST_RANGE()/TEST_MATRIX() are positional marker macros.
+  # Unity's runner generator only honors one when it sits (whitespace only in between) 
+  # directly ahead of the `void test_Foo(...)` it configures.
+  # Captures one or more stacked calls (group 1) plus the name of the function they 
+  # immediately precede (group 2). So, callers can re-associate the macro text with its 
+  # function after preprocessing has separated them.
+  # The non-greedy `\(.*?\)` shares Unity's own limitation of not handling nested parens
+  # in macro arguments (see generate_test_runner.rb's identical fragment) -- parity, not a gap.
+  TEST_CASE_DIRECTIVE = /((?:[ \t]*(?:TEST_CASE|TEST_RANGE|TEST_MATRIX)\s*\(.*?\)\s*)+)void\s+(\w+)\s*\(/m
+
+  PARTIAL_IMPL_FILENAME = /\A#{PARTIAL_FILENAME_PREFIX}.+_impl#{Regexp.escape(EXTENSION_CORE_SOURCE)}\z/
+end
+
+GIT_COMMIT_SHA_FILENAME = 'GIT_COMMIT_SHA'
+
+# Escaped newline literal (literally double-slash-n) for "encoding" multiline strings as single string
+NEWLINE_TOKEN = '\\n'
+
+MIXIN_SIGIL_INLINE_YAML = '='
+MIXIN_SIGIL_FILEPATH    = '@'
+
+DEFAULT_PROJECT_FILENAME = 'project.yml'
+# #1250 -- self-documenting alternative to the generic DEFAULT_PROJECT_FILENAME, tried
+# during default discovery only (Projectinator#load) when no --project/-p or
+# CEEDLING_PROJECT_FILE was given. Neither name is "preferred" over the other -- either
+# alone is used as found; both present is an error (see Projectinator#load).
+ALTERNATE_PROJECT_FILENAME = 'ceedling.yml'
+DEFAULT_BUILD_LOGS_PATH = 'logs'
+
+DOCS_SITE_LOCAL_PATH = 'site-local'
+
+GENERATED_DIR_PATH = [['vendor', 'ceedling'], 'src', "test", ['test', 'support'], 'build'].each{|p| File.join(*p)}
+
+# Generated include guards take the form GEN<hash>_<STEM>_H_CEEDLING (see
+# FileWrapper.generate_include_guard). The pattern recognizes one wherever it appears in a
+# line of text by its fixed head and tail, each at an identifier boundary.
+GENERATED_INCLUDE_GUARD_PREFIX      = 'GEN'
+GENERATED_INCLUDE_GUARD_SUFFIX      = '_CEEDLING'
+GENERATED_INCLUDE_GUARD_HASH_LENGTH = 8
+GENERATED_INCLUDE_GUARD_PATTERN     = /\b#{GENERATED_INCLUDE_GUARD_PREFIX}[0-9A-F]{#{GENERATED_INCLUDE_GUARD_HASH_LENGTH}}_\w+#{GENERATED_INCLUDE_GUARD_SUFFIX}\b/
+
+PREPROCESS_SYM = :preprocess
+
+CEXCEPTION_SYM       = :cexception
+CEXCEPTION_ROOT_PATH = 'c_exception'
+CEXCEPTION_LIB_PATH  = "#{CEXCEPTION_ROOT_PATH}/lib"
+CEXCEPTION_C_FILE    = 'CException.c'
+CEXCEPTION_H_FILE    = 'CException.h'
+
+UNITY_SYM              = :unity
+UNITY_ROOT_PATH        = 'unity'
+UNITY_LIB_PATH         = "#{UNITY_ROOT_PATH}/src"
+UNITY_C_FILE           = 'unity.c'
+UNITY_H_FILE           = 'unity.h'
+UNITY_INTERNALS_H_FILE = 'unity_internals.h'
+
+RUNNER_BUILD_CMDLINE_ARGS_DEFINE = 'UNITY_USE_COMMAND_LINE_ARGS'
+
+CMOCK_SYM       = :cmock
+CMOCK_ROOT_PATH = 'cmock'
+CMOCK_LIB_PATH  = "#{CMOCK_ROOT_PATH}/src"
+CMOCK_C_FILE    = 'cmock.c'
+CMOCK_H_FILE    = 'cmock.h'
+
+DEFAULT_CEEDLING_LOGFILE = 'ceedling.log'
+
+BACKTRACE_GDB_SCRIPT_FILE = 'backtrace.gdb'
+
+INPUT_CONFIGURATION_CACHE_FILE = 'input.yml'   unless defined?(INPUT_CONFIGURATION_CACHE_FILE)     # input configuration file dump
+DEFINES_DEPENDENCY_CACHE_FILE  = 'defines_dependency.yml' unless defined?(DEFINES_DEPENDENCY_CACHE_FILE) # preprocessor definitions for files
+
+TEST_ROOT_NAME    = 'test'                unless defined?(TEST_ROOT_NAME)
+TEST_TASK_ROOT    = TEST_ROOT_NAME + ':'  unless defined?(TEST_TASK_ROOT)
+TEST_SYM          = :test
+
+RELEASE_ROOT_NAME = 'release'                unless defined?(RELEASE_ROOT_NAME)
+RELEASE_TASK_ROOT = RELEASE_ROOT_NAME + ':'  unless defined?(RELEASE_TASK_ROOT)
+RELEASE_SYM       = RELEASE_ROOT_NAME.to_sym unless defined?(RELEASE_SYM)
+
+UTILS_ROOT_NAME   = 'utils'                unless defined?(UTILS_ROOT_NAME)
+UTILS_TASK_ROOT   = UTILS_ROOT_NAME + ':'  unless defined?(UTILS_TASK_ROOT)
+UTILS_SYM         = UTILS_ROOT_NAME.to_sym unless defined?(UTILS_SYM)
+
+GEN_ROOT_NAME = 'gen'                unless defined?(GEN_ROOT_NAME)
+GEN_TASK_ROOT = GEN_ROOT_NAME + ':'  unless defined?(GEN_TASK_ROOT)
+GEN_SYM       = GEN_ROOT_NAME.to_sym unless defined?(GEN_SYM)
+
+GENERATE_MOCKS_TASK_ROOT       = GEN_TASK_ROOT + 'mocks:'       unless defined?(GENERATE_MOCKS_TASK_ROOT)
+GENERATE_TEST_RUNNER_TASK_ROOT = GEN_TASK_ROOT + 'test_runner:' unless defined?(GENERATE_TEST_RUNNER_TASK_ROOT)
+
+OPERATION_PREPROCESS_SYM  = :preprocess unless defined?(OPERATION_PREPROCESS_SYM)
+OPERATION_COMPILE_SYM     = :compile    unless defined?(OPERATION_COMPILE_SYM)
+OPERATION_ASSEMBLE_SYM    = :assemble   unless defined?(OPERATION_ASSEMBLE_SYM)
+OPERATION_LINK_SYM        = :link       unless defined?(OPERATION_LINK_SYM)
+
+PREPROCESS_STANDINS_DIR  = 'standins'
+PREPROCESS_FULL_EXPANSION_DIR  = 'full_expansion'
+PREPROCESS_DIRECTIVES_ONLY_DIR = 'directives_only'
+PREPROCESS_RAW_DIRECTIVES_ONLY_DIR = 'directives_only/raw'
+PREPROCESS_FALLBACK_EXPANSION_DIR = 'fallback_expansion'
+
+BUILD_OUT_DIR          = 'out'
+BUILD_RESULTS_DIR      = 'results'
+BUILD_DEPENDENCIES_DIR = 'dependencies'
+
+NULL_FILE_PATH = '/dev/null'
+
+TESTS_BASE_PATH   = TEST_ROOT_NAME
+RELEASE_BASE_PATH = RELEASE_ROOT_NAME
+
+VENDORS_FILES = %w(unity UnityHelper cmock CException ceedling).freeze
+
+# Ruby Here
+UNITY_TEST_RESULTS_TEMPLATE = <<~UNITY_TEST_RESULTS
+  %{output}
+
+  -----------------------
+  %{total} Tests %{failed} Failures %{ignored} Ignored
+  %{result}
+UNITY_TEST_RESULTS
+
+# Names Windows' Installer Detection treats as an installer's, requiring administrator rights
+WINDOWS_INSTALLER_KEYWORDS = /install|setup|update|patch/i
+
+# Requests the invoker's own rights, which turns Installer Detection off for a test executable
+TEST_EXECUTABLE_MANIFEST = <<~XML.freeze
+  <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+  <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+    <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+      <security>
+        <requestedPrivileges>
+          <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+        </requestedPrivileges>
+      </security>
+    </trustInfo>
+  </assembly>
+XML

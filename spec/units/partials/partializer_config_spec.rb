@@ -1,0 +1,654 @@
+# =========================================================================
+#   Ceedling - Test-Centered Build System for C
+#   ThrowTheSwitch.org
+#   Copyright (c) 2010-26 Mike Karlesky, Mark VanderVoord, & Greg Williams
+#   SPDX-License-Identifier: MIT
+# =========================================================================
+
+require 'spec_helper'
+require 'ceedling/c_extractor/c_extractor_code_text'
+require 'ceedling/c_extractor/c_extractor_preprocessing'
+require 'ceedling/partials/partials'
+require 'ceedling/partials/partializer_config'
+
+describe PartializerConfig do
+
+  it "defines MACRO_NAMES with the expected 20 macro name strings" do
+    expect( PartializerConfig::MACRO_NAMES ).to include(
+      'TEST_PARTIAL_PUBLIC_MODULE',
+      'TEST_PARTIAL_PRIVATE_MODULE',
+      'MOCK_PARTIAL_PUBLIC_MODULE',
+      'MOCK_PARTIAL_PRIVATE_MODULE',
+      'TEST_PARTIAL_MODULE',
+      'MOCK_PARTIAL_MODULE',
+      'TEST_PARTIAL_ALL_MODULE',
+      'MOCK_PARTIAL_ALL_MODULE',
+      'TEST_PARTIAL_CONFIG',
+      'MOCK_PARTIAL_CONFIG'
+    )
+    expect( PartializerConfig::MACRO_NAMES.size ).to eq 20
+  end
+
+  # Every macro has a directory-qualified counterpart, so the two families stay in
+  # step. A missing `_AT` name is silently unrecognized rather than an error.
+  it "defines an _AT counterpart for every macro name" do
+    bare, qualified = PartializerConfig::MACRO_NAMES.partition { |n| !n.end_with?('_AT') }
+
+    expect( qualified.sort ).to eq( bare.map { |n| "#{n}_AT" }.sort )
+  end
+
+  context "#extract_configs" do
+    before(:each) do
+      code_text               = CExtractorCodeText.new
+      c_extractor_preprocessing = CExtractorPreprocessing.new({ c_extractor_code_text: code_text })
+      @config = described_class.new({ c_extractor_preprocessing: c_extractor_preprocessing })
+    end
+
+    it "extracts configs from a string" do
+      result = @config.extract_configs('TEST_PARTIAL_PUBLIC_MODULE(widget)')
+      expect( result['widget'].tests.type ).to eq Partials::PUBLIC
+    end
+
+    # Recognition is by exact macro name. A name not in MACRO_NAMES yields nothing at
+    # all rather than a partially understood directive.
+    it "yields no config for a macro name it does not recognize" do
+      result = @config.extract_configs('TEST_PARTIAL_SOMETHING_ELSE(config)')
+
+      expect( result ).to be_empty
+    end
+
+    it "recognizes a directory-qualified macro name" do
+      result = @config.extract_configs('TEST_PARTIAL_PUBLIC_MODULE_AT(drivers/uart, config)')
+
+      expect( result ).to_not be_empty
+    end
+
+    # --- Directory-qualified macros ---
+    #
+    # A qualified macro carries its directory and its module as separate parameters.
+    # The two join into one key, so a module is identified the same way whichever
+    # macro family named it and two modules sharing a basename stay distinct.
+    context "a directory-qualified MODULE macro" do
+      it "keys the config on the directory joined to the module" do
+        result = @config.extract_configs('TEST_PARTIAL_PUBLIC_MODULE_AT(drivers/uart, config)')
+
+        expect( result.keys ).to eq( ['drivers/uart/config'] )
+        expect( result['drivers/uart/config'].module ).to eq( 'drivers/uart/config' )
+      end
+
+      it "keeps two modules sharing a basename distinct" do
+        result = @config.extract_configs(
+          "TEST_PARTIAL_ALL_MODULE_AT(drivers/uart, config)\n" \
+          "TEST_PARTIAL_ALL_MODULE_AT(drivers/spi, config)"
+        )
+
+        expect( result.keys.sort ).to eq( ['drivers/spi/config', 'drivers/uart/config'] )
+      end
+
+      # The ACCUMULATE macros start from an empty function set, so each needs a
+      # matching config macro supplying at least one addition to be valid at all.
+      it "sets the same function type its unqualified counterpart sets" do
+        {
+          'TEST_PARTIAL_PUBLIC_MODULE_AT'  => [:tests, Partials::PUBLIC,     nil],
+          'TEST_PARTIAL_PRIVATE_MODULE_AT' => [:tests, Partials::PRIVATE,    nil],
+          'TEST_PARTIAL_ALL_MODULE_AT'     => [:tests, Partials::DEDUCT,     nil],
+          'MOCK_PARTIAL_PUBLIC_MODULE_AT'  => [:mocks, Partials::PUBLIC,     nil],
+          'MOCK_PARTIAL_PRIVATE_MODULE_AT' => [:mocks, Partials::PRIVATE,    nil],
+          'MOCK_PARTIAL_ALL_MODULE_AT'     => [:mocks, Partials::DEDUCT,     nil],
+          'TEST_PARTIAL_MODULE_AT'         => [:tests, Partials::ACCUMULATE, 'TEST_PARTIAL_CONFIG_AT'],
+          'MOCK_PARTIAL_MODULE_AT'         => [:mocks, Partials::ACCUMULATE, 'MOCK_PARTIAL_CONFIG_AT'],
+        }.each do |macro, (side, type, config_macro)|
+          source = "#{macro}(drivers/uart, config)"
+          source += "\n#{config_macro}(drivers/uart, config, helper)" if config_macro
+
+          result = @config.extract_configs( source )
+
+          expect( result['drivers/uart/config'] ).to_not( be_nil, "#{macro} produced no config" )
+          expect( result['drivers/uart/config'].send( side ).type ).to( eq(type), "#{macro} set the wrong type" )
+        end
+      end
+
+      # Only as much path as it takes to distinguish the module is needed, matching
+      # how every other file reference in a test is resolved.
+      it "accepts a partial directory qualifier" do
+        result = @config.extract_configs('TEST_PARTIAL_ALL_MODULE_AT(uart, config)')
+
+        expect( result.keys ).to eq( ['uart/config'] )
+      end
+    end
+
+    context "a directory-qualified CONFIG macro" do
+      it "pairs with the joined key of its MODULE macro" do
+        result = @config.extract_configs(
+          "TEST_PARTIAL_ALL_MODULE_AT(drivers/uart, config)\n" \
+          "TEST_PARTIAL_CONFIG_AT(drivers/uart, config, -helper)"
+        )
+
+        expect( result['drivers/uart/config'].tests.subtractions ).to eq( ['helper'] )
+      end
+
+      it "reads its function names after the directory and the module" do
+        result = @config.extract_configs(
+          "MOCK_PARTIAL_MODULE_AT(drivers/uart, config)\n" \
+          "MOCK_PARTIAL_CONFIG_AT(drivers/uart, config, one, +two)"
+        )
+
+        expect( result['drivers/uart/config'].mocks.additions ).to eq( ['one', 'two'] )
+      end
+
+      # Pairing is exact. A qualifier that does not match the one its MODULE macro
+      # used names a module that was never declared.
+      it "raises when its directory does not match its MODULE macro's" do
+        expect {
+          @config.extract_configs(
+            "TEST_PARTIAL_ALL_MODULE_AT(drivers/uart, config)\n" \
+            "TEST_PARTIAL_CONFIG_AT(drivers/spi, config, -helper)"
+          )
+        }.to raise_error( CeedlingException, /no corresponding MODULE Partial macro directive/ )
+      end
+
+      it "raises when it carries no directory while its MODULE macro does" do
+        expect {
+          @config.extract_configs(
+            "TEST_PARTIAL_ALL_MODULE_AT(drivers/uart, config)\n" \
+            "TEST_PARTIAL_CONFIG(config, -helper)"
+          )
+        }.to raise_error( CeedlingException, /no corresponding MODULE Partial macro directive/ )
+      end
+    end
+
+    # Two directory spellings cannot work, because the generated #include the
+    # preprocessor emits would never name the file Ceedling writes.
+    # Both macro styles build the generated filename through the C preprocessor, and the
+    # preprocessor emits each argument verbatim. An argument Ceedling cannot reproduce as
+    # the filename it actually writes names a file that is never written, which surfaces
+    # as a missing include for a filename the author never typed. Every rejection below
+    # is that mismatch, caught where the author can act on it.
+    context "a module argument that cannot be honored" do
+      # The prefix lands on the first path segment rather than the filename, so the
+      # expansion and the generated filename disagree.
+      it "rejects a path in a bare macro's module argument, naming the _AT form" do
+        expect {
+          @config.extract_configs('TEST_PARTIAL_PUBLIC_MODULE(drivers/uart/config)')
+        }.to raise_error( CeedlingException, /must not contain a path/ )
+      end
+
+      it "suggests the directory-qualified call that replaces it" do
+        expect {
+          @config.extract_configs('TEST_PARTIAL_PUBLIC_MODULE(drivers/uart/config)')
+        }.to raise_error( CeedlingException, %r{TEST_PARTIAL_PUBLIC_MODULE_AT\(drivers/uart, config\)} )
+      end
+
+      it "rejects a backslash path in a bare macro's module argument" do
+        expect {
+          @config.extract_configs('TEST_PARTIAL_PUBLIC_MODULE(drivers\\uart\\config)')
+        }.to raise_error( CeedlingException, /must not contain a path/ )
+      end
+
+      it "rejects a path in a qualified macro's module argument" do
+        expect {
+          @config.extract_configs('TEST_PARTIAL_PUBLIC_MODULE_AT(drivers, uart/config)')
+        }.to raise_error( CeedlingException, /must not contain a path/ )
+      end
+
+      it "rejects a path in a CONFIG macro's module argument" do
+        expect {
+          @config.extract_configs(
+            "TEST_PARTIAL_ALL_MODULE(config)\n" \
+            "TEST_PARTIAL_CONFIG(drivers/uart/config, -helper)"
+          )
+        }.to raise_error( CeedlingException, /must not contain a path/ )
+      end
+
+      # Quotes reach the generated filename as escaped quotes. Ceedling stripped them and
+      # wrote a filename without them, so the two could never agree.
+      it "rejects a quoted module argument" do
+        expect {
+          @config.extract_configs('TEST_PARTIAL_PUBLIC_MODULE("sensor")')
+        }.to raise_error( CeedlingException, /must not be quoted/ )
+      end
+
+      it "rejects a quoted module argument in a qualified macro" do
+        expect {
+          @config.extract_configs('TEST_PARTIAL_PUBLIC_MODULE_AT(drivers, "sensor")')
+        }.to raise_error( CeedlingException, /must not be quoted/ )
+      end
+
+      # An unterminated string swallows the rest of the call, so it never parses as a
+      # macro at all and configures nothing. The compiler reports the malformed C.
+      it "configures nothing for an unterminated quotation mark" do
+        expect( @config.extract_configs('TEST_PARTIAL_PUBLIC_MODULE(sen"sor)') ).to be_empty
+      end
+
+      # Reported rather than crashing on a nil argument.
+      it "rejects a bare macro with no module argument" do
+        expect {
+          @config.extract_configs('TEST_PARTIAL_PUBLIC_MODULE()')
+        }.to raise_error( CeedlingException, /requires a module name/ )
+      end
+
+      it "rejects a qualified macro with no module argument" do
+        expect {
+          @config.extract_configs('TEST_PARTIAL_PUBLIC_MODULE_AT(drivers)')
+        }.to raise_error( CeedlingException, /requires a directory and a module name/ )
+      end
+
+      it "rejects an empty module argument" do
+        expect {
+          @config.extract_configs('TEST_PARTIAL_PUBLIC_MODULE_AT(drivers, )')
+        }.to raise_error( CeedlingException, /requires a directory and a module name/ )
+      end
+    end
+
+    context "a module argument that is honored" do
+      it "accepts a bare module name" do
+        result = @config.extract_configs('TEST_PARTIAL_PUBLIC_MODULE(sensor)')
+
+        expect( result.keys ).to eq(['sensor'])
+      end
+
+      # Dots are legitimate: a module name may carry a version or a dotted spelling, and
+      # the prefix still lands on the whole name in both the expansion and the filename.
+      it "accepts a dotted module name" do
+        result = @config.extract_configs('TEST_PARTIAL_PUBLIC_MODULE(sensor.v2)')
+
+        expect( result.keys ).to eq(['sensor.v2'])
+      end
+
+      it "accepts a module name alongside its own directory" do
+        result = @config.extract_configs('TEST_PARTIAL_PUBLIC_MODULE_AT(drivers/uart, config)')
+
+        expect( result.keys ).to eq(['drivers/uart/config'])
+      end
+    end
+
+    context "a directory qualifier that cannot be honored" do
+      it "rejects an absolute directory" do
+        expect {
+          @config.extract_configs('TEST_PARTIAL_ALL_MODULE_AT(/abs/drivers, config)')
+        }.to raise_error( CeedlingException, /absolute/ )
+      end
+
+      it "rejects a quoted directory" do
+        expect {
+          @config.extract_configs('TEST_PARTIAL_ALL_MODULE_AT("drivers/uart", config)')
+        }.to raise_error( CeedlingException, /quoted/ )
+      end
+
+      # A Partial is written below its test's own generated directory, while the emitted
+      # #include resolves against the including file. A climbing directory makes those
+      # two different places.
+      it "rejects a directory that climbs above the project" do
+        expect {
+          @config.extract_configs('TEST_PARTIAL_ALL_MODULE_AT(../shared, config)')
+        }.to raise_error( CeedlingException, /\.\./ )
+      end
+
+      it "rejects a climbing segment anywhere in the directory" do
+        expect {
+          @config.extract_configs('TEST_PARTIAL_ALL_MODULE_AT(drivers/../shared, config)')
+        }.to raise_error( CeedlingException, /\.\./ )
+      end
+
+      it "accepts a directory whose own name merely begins with dots" do
+        result = @config.extract_configs('TEST_PARTIAL_ALL_MODULE_AT(..shared, config)')
+
+        expect( result.keys ).to eq(['..shared/config'])
+      end
+
+      it "rejects an empty directory" do
+        expect {
+          @config.extract_configs('TEST_PARTIAL_ALL_MODULE_AT(, config)')
+        }.to raise_error( CeedlingException, /requires a directory/ )
+      end
+    end
+
+    # The module argument itself is already path-tolerant. Extraction splits only on
+    # top-level commas, so a slash reaches the config as written and the key is the
+    # argument verbatim. Nothing downstream of here understands that key yet.
+  end
+
+  context "#extract_configs_from_string" do
+
+    before(:each) do
+      code_text               = CExtractorCodeText.new
+      c_extractor_preprocessing = CExtractorPreprocessing.new({ c_extractor_code_text: code_text })
+      @config = described_class.new({ c_extractor_preprocessing: c_extractor_preprocessing })
+    end
+
+    def extract(str)
+      @config.extract_configs_from_string(str)
+    end
+
+    # --- Empty / no-match ---
+
+    it "returns empty hash for empty input" do
+      expect( extract('') ).to eq({})
+    end
+
+    it "returns empty hash when no matching macros are present" do
+      expect( extract('int x = UNRELATED(42);') ).to eq({})
+    end
+
+    # --- MODULE macros: type ---
+
+    it "extracts TEST_PARTIAL_PUBLIC_MODULE and sets tests.type to PUBLIC" do
+      result = extract('TEST_PARTIAL_PUBLIC_MODULE(calculator)')
+      expect( result.keys ).to eq ['calculator']
+      expect( result['calculator'].tests.type ).to eq Partials::PUBLIC
+      expect( result['calculator'].mocks.type ).to be_nil
+    end
+
+    it "extracts TEST_PARTIAL_PRIVATE_MODULE and sets tests.type to PRIVATE" do
+      result = extract('TEST_PARTIAL_PRIVATE_MODULE(calculator)')
+      expect( result['calculator'].tests.type ).to eq Partials::PRIVATE
+      expect( result['calculator'].mocks.type ).to be_nil
+    end
+
+    it "extracts MOCK_PARTIAL_PUBLIC_MODULE and sets mocks.type to PUBLIC" do
+      result = extract('MOCK_PARTIAL_PUBLIC_MODULE(calculator)')
+      expect( result['calculator'].mocks.type ).to eq Partials::PUBLIC
+      expect( result['calculator'].tests.type ).to be_nil
+    end
+
+    it "extracts MOCK_PARTIAL_PRIVATE_MODULE and sets mocks.type to PRIVATE" do
+      result = extract('MOCK_PARTIAL_PRIVATE_MODULE(calculator)')
+      expect( result['calculator'].mocks.type ).to eq Partials::PRIVATE
+      expect( result['calculator'].tests.type ).to be_nil
+    end
+
+    # --- TEST/MOCK_PARTIAL_MODULE: ACCUMULATE ---
+
+    it "extracts TEST_PARTIAL_MODULE and sets tests.type to ACCUMULATE" do
+      input = <<~C
+        TEST_PARTIAL_MODULE(calculator)
+        TEST_PARTIAL_CONFIG(calculator, add, subtract)
+      C
+      result = extract(input)
+      expect( result['calculator'].tests.type ).to eq Partials::ACCUMULATE
+      expect( result['calculator'].tests.additions ).to eq ['add', 'subtract']
+    end
+
+    it "extracts MOCK_PARTIAL_MODULE and sets mocks.type to ACCUMULATE" do
+      input = <<~C
+        MOCK_PARTIAL_MODULE(calculator)
+        MOCK_PARTIAL_CONFIG(calculator, +multiply)
+      C
+      result = extract(input)
+      expect( result['calculator'].mocks.type ).to eq Partials::ACCUMULATE
+      expect( result['calculator'].mocks.additions ).to eq ['multiply']
+    end
+
+    it "raises when TEST_PARTIAL_MODULE is used alone without any CONFIG additions" do
+      expect {
+        extract('TEST_PARTIAL_MODULE(calculator)')
+      }.to raise_error(CeedlingException, /TEST_PARTIAL_MODULE/)
+    end
+
+    # --- TEST/MOCK_PARTIAL_ALL_MODULE: DEDUCT ---
+
+    it "extracts TEST_PARTIAL_ALL_MODULE and sets tests.type to DEDUCT" do
+      result = extract('TEST_PARTIAL_ALL_MODULE(calculator)')
+      expect( result['calculator'].tests.type ).to eq Partials::DEDUCT
+      expect( result['calculator'].mocks.type ).to be_nil
+    end
+
+    it "extracts MOCK_PARTIAL_ALL_MODULE and sets mocks.type to DEDUCT" do
+      result = extract('MOCK_PARTIAL_ALL_MODULE(calculator)')
+      expect( result['calculator'].mocks.type ).to eq Partials::DEDUCT
+      expect( result['calculator'].tests.type ).to be_nil
+    end
+
+    it "does not raise when TEST_PARTIAL_ALL_MODULE is used alone without CONFIG (means all functions)" do
+      expect { extract('TEST_PARTIAL_ALL_MODULE(calculator)') }.not_to raise_error
+    end
+
+    it "does not raise when MOCK_PARTIAL_ALL_MODULE is used alone without CONFIG (means all functions)" do
+      expect { extract('MOCK_PARTIAL_ALL_MODULE(calculator)') }.not_to raise_error
+    end
+
+    it "extracts TEST_PARTIAL_ALL_MODULE with CONFIG subtractions" do
+      input = <<~C
+        TEST_PARTIAL_ALL_MODULE(calculator)
+        TEST_PARTIAL_CONFIG(calculator, -internal_helper, -debug_only)
+      C
+      result = extract(input)
+      expect( result['calculator'].tests.type        ).to eq Partials::DEDUCT
+      expect( result['calculator'].tests.subtractions ).to contain_exactly('internal_helper', 'debug_only')
+      expect( result['calculator'].tests.additions    ).to eq []
+    end
+
+    it "extracts MOCK_PARTIAL_ALL_MODULE with CONFIG subtractions" do
+      input = <<~C
+        MOCK_PARTIAL_ALL_MODULE(driver)
+        MOCK_PARTIAL_CONFIG(driver, -write)
+      C
+      result = extract(input)
+      expect( result['driver'].mocks.type        ).to eq Partials::DEDUCT
+      expect( result['driver'].mocks.subtractions ).to eq ['write']
+      expect( result['driver'].mocks.additions    ).to eq []
+    end
+
+    it "raises when additions are used with TEST DEDUCT" do
+      input = <<~C
+        TEST_PARTIAL_ALL_MODULE(foo)
+        TEST_PARTIAL_CONFIG(foo, "+bar")
+      C
+      expect { extract(input) }.to raise_error(CeedlingException, /foo/)
+    end
+
+    it "raises when additions are used with MOCK DEDUCT" do
+      input = <<~C
+        MOCK_PARTIAL_ALL_MODULE(foo)
+        MOCK_PARTIAL_CONFIG(foo, "baz", "-bar")
+      C
+      expect { extract(input) }.to raise_error(CeedlingException, /foo/)
+    end
+
+    it "does not raise when only subtractions are used with DEDUCT" do
+      input = <<~C
+        TEST_PARTIAL_ALL_MODULE(foo)
+        TEST_PARTIAL_CONFIG(foo, "-a", "-b")
+      C
+      expect { extract(input) }.not_to raise_error
+    end
+
+    it "does not raise when CONFIG is present but has no function names (empty subtractions)" do
+      # A CONFIG macro with only the module name and no function args is a degenerate but valid case
+      input = <<~C
+        TEST_PARTIAL_ALL_MODULE(foo)
+        TEST_PARTIAL_CONFIG(foo)
+      C
+      expect { extract(input) }.not_to raise_error
+    end
+
+    it "allows TEST_PARTIAL_ALL_MODULE and MOCK_PARTIAL_PUBLIC_MODULE together for the same module" do
+      input = <<~C
+        TEST_PARTIAL_ALL_MODULE(widget)
+        MOCK_PARTIAL_PUBLIC_MODULE(widget)
+      C
+      result = extract(input)
+      expect( result['widget'].tests.type ).to eq Partials::DEDUCT
+      expect( result['widget'].mocks.type ).to eq Partials::PUBLIC
+    end
+
+    # --- MODULE macro overwrite raises (extended to ALL_MODULE variants) ---
+
+    it "raises when TEST_PARTIAL_ALL_MODULE and TEST_PARTIAL_MODULE both target the same module" do
+      input = "TEST_PARTIAL_ALL_MODULE(calc) TEST_PARTIAL_MODULE(calc)"
+      expect { extract(input) }.to raise_error(CeedlingException, /calc/)
+    end
+
+    it "raises when TEST_PARTIAL_ALL_MODULE and TEST_PARTIAL_PUBLIC_MODULE both target the same module" do
+      input = "TEST_PARTIAL_ALL_MODULE(calc) TEST_PARTIAL_PUBLIC_MODULE(calc)"
+      expect { extract(input) }.to raise_error(CeedlingException, /calc/)
+    end
+
+    it "raises when TEST_PARTIAL_ALL_MODULE and TEST_PARTIAL_PRIVATE_MODULE both target the same module" do
+      input = "TEST_PARTIAL_ALL_MODULE(calc) TEST_PARTIAL_PRIVATE_MODULE(calc)"
+      expect { extract(input) }.to raise_error(CeedlingException, /calc/)
+    end
+
+    it "raises when MOCK_PARTIAL_ALL_MODULE and MOCK_PARTIAL_MODULE both target the same module" do
+      input = "MOCK_PARTIAL_ALL_MODULE(calc) MOCK_PARTIAL_MODULE(calc)"
+      expect { extract(input) }.to raise_error(CeedlingException, /calc/)
+    end
+
+    it "raises when MOCK_PARTIAL_ALL_MODULE and MOCK_PARTIAL_PUBLIC_MODULE both target the same module" do
+      input = "MOCK_PARTIAL_ALL_MODULE(calc) MOCK_PARTIAL_PUBLIC_MODULE(calc)"
+      expect { extract(input) }.to raise_error(CeedlingException, /calc/)
+    end
+
+    it "raises when MOCK_PARTIAL_ALL_MODULE and MOCK_PARTIAL_PRIVATE_MODULE both target the same module" do
+      input = "MOCK_PARTIAL_ALL_MODULE(calc) MOCK_PARTIAL_PRIVATE_MODULE(calc)"
+      expect { extract(input) }.to raise_error(CeedlingException, /calc/)
+    end
+
+    # --- MODULE macro overwrite raises ---
+
+    it "raises when the same MODULE macro is used twice for the same module" do
+      input = "TEST_PARTIAL_PUBLIC_MODULE(calc) TEST_PARTIAL_PUBLIC_MODULE(calc)"
+      expect { extract(input) }.to raise_error(CeedlingException, /calc/)
+    end
+
+    it "raises when multiple MODULE macros target the same tests entry for a module" do
+      input = <<~C
+        TEST_PARTIAL_PUBLIC_MODULE(calc)
+        TEST_PARTIAL_PRIVATE_MODULE(calc)
+      C
+      expect { extract(input) }.to raise_error(CeedlingException, /calc/)
+    end
+
+    # --- Multiple modules ---
+
+    it "creates separate Config entries for different modules" do
+      input = <<~C
+        TEST_PARTIAL_PUBLIC_MODULE(module_a)
+        MOCK_PARTIAL_PUBLIC_MODULE(module_b)
+      C
+      result = extract(input)
+      expect( result.keys ).to contain_exactly('module_a', 'module_b')
+      expect( result['module_a'].tests.type ).to eq Partials::PUBLIC
+      expect( result['module_b'].mocks.type ).to eq Partials::PUBLIC
+    end
+
+    # --- CONFIG: additions and subtractions ---
+
+    it "splits bare, +, and - function names into additions and subtractions" do
+      input = <<~C
+        TEST_PARTIAL_PUBLIC_MODULE(calculator)
+        TEST_PARTIAL_CONFIG(calculator, add, +subtract, -multiply)
+      C
+      result = extract(input)
+      expect( result['calculator'].tests.additions    ).to contain_exactly('add', 'subtract')
+      expect( result['calculator'].tests.subtractions ).to eq ['multiply']
+    end
+
+    it "populates mocks.additions and mocks.subtractions from MOCK_PARTIAL_CONFIG" do
+      input = <<~C
+        MOCK_PARTIAL_PUBLIC_MODULE(driver)
+        MOCK_PARTIAL_CONFIG(driver, +read, -write)
+      C
+      result = extract(input)
+      expect( result['driver'].mocks.additions    ).to eq ['read']
+      expect( result['driver'].mocks.subtractions ).to eq ['write']
+    end
+
+    # --- Quoted function names ---
+
+    it "strips double-quotes from quoted function names and applies prefix logic" do
+      input = <<~C
+        TEST_PARTIAL_PUBLIC_MODULE(calculator)
+        TEST_PARTIAL_CONFIG(calculator, "add", "+subtract", "-multiply")
+      C
+      result = extract(input)
+      expect( result['calculator'].tests.additions    ).to contain_exactly('add', 'subtract')
+      expect( result['calculator'].tests.subtractions ).to eq ['multiply']
+    end
+
+    # --- CONFIG referencing unknown module ---
+
+    it "raises an exception when CONFIG macro references a module not declared by a MODULE macro" do
+      expect {
+        extract('TEST_PARTIAL_CONFIG(unknown_module, add)')
+      }.to raise_error(CeedlingException, /TEST_PARTIAL_CONFIG.*unknown_module/)
+    end
+
+    it "includes the CONFIG macro name in the exception message" do
+      expect {
+        extract('MOCK_PARTIAL_CONFIG(ghost, +func)')
+      }.to raise_error(CeedlingException, /MOCK_PARTIAL_CONFIG/)
+    end
+
+    it "raises when tests are ACCUMULATE without CONFIG additions (even when mocks are PUBLIC)" do
+      input = 'TEST_PARTIAL_MODULE(foo) MOCK_PARTIAL_PUBLIC_MODULE(foo)'
+      expect { extract(input) }.to raise_error(CeedlingException, /TEST_PARTIAL_MODULE/)
+    end
+
+    it "does not raise when tests are PUBLIC and mocks are PRIVATE" do
+      input = 'TEST_PARTIAL_PUBLIC_MODULE(foo) MOCK_PARTIAL_PRIVATE_MODULE(foo)'
+      expect { extract(input) }.not_to raise_error
+    end
+
+    # --- Validation: subtractions illegal with ACCUMULATE ---
+
+    it "raises when subtractions are used with TEST ACCUMULATE" do
+      input = <<~C
+        TEST_PARTIAL_MODULE(foo)
+        TEST_PARTIAL_CONFIG(foo, "-bar")
+      C
+      expect { extract(input) }.to raise_error(CeedlingException, /foo/)
+    end
+
+    it "raises when subtractions are used with MOCK ACCUMULATE" do
+      input = <<~C
+        MOCK_PARTIAL_MODULE(foo)
+        MOCK_PARTIAL_CONFIG(foo, "+baz", "-bar")
+      C
+      expect { extract(input) }.to raise_error(CeedlingException, /foo/)
+    end
+
+    it "does not raise when only additions are used with ACCUMULATE" do
+      input = <<~C
+        TEST_PARTIAL_MODULE(foo)
+        TEST_PARTIAL_CONFIG(foo, "a", "+b")
+      C
+      expect { extract(input) }.not_to raise_error
+    end
+
+    # --- Complete round-trip ---
+
+    it "handles a complete source snippet with MODULE and CONFIG macros together" do
+      input = <<~C
+        #include "calculator.h"
+
+        TEST_PARTIAL_PUBLIC_MODULE(calculator)
+        TEST_PARTIAL_CONFIG(calculator, +add, -internal_helper)
+
+        MOCK_PARTIAL_PRIVATE_MODULE(driver)
+        MOCK_PARTIAL_CONFIG(driver, write)
+
+        void some_function(void) {}
+      C
+      result = extract(input)
+
+      expect( result.keys ).to contain_exactly('calculator', 'driver')
+
+      expect( result['calculator'].module ).to eq 'calculator'
+      expect( result['calculator'].tests.type        ).to eq Partials::PUBLIC
+      expect( result['calculator'].tests.additions    ).to eq ['add']
+      expect( result['calculator'].tests.subtractions ).to eq ['internal_helper']
+      expect( result['calculator'].mocks.type         ).to be_nil
+      expect( result['calculator'].mocks.additions    ).to eq []
+      expect( result['calculator'].mocks.subtractions ).to eq []
+
+      expect( result['driver'].module ).to eq 'driver'
+      expect( result['driver'].mocks.type         ).to eq Partials::PRIVATE
+      expect( result['driver'].mocks.additions    ).to eq ['write']
+      expect( result['driver'].mocks.subtractions ).to eq []
+      expect( result['driver'].tests.type         ).to be_nil
+    end
+
+  end
+
+end

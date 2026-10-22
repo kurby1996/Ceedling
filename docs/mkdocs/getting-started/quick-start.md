@@ -1,0 +1,89 @@
+# Quick Start
+
+For a test suite project using the default toolchain `gcc`, Ceedling’s
+configuration file could be as simple as this:
+
+```yaml
+:project:
+  :build_root: project/build/
+
+:paths:
+  :test:
+    - tests/**
+  :source:
+    - source/**
+  :include:
+    - inc/**
+```
+
+To execute all your unit tests, you would run `ceedling test:all`.
+
+---
+
+## Handy Documentation
+
+* [Installation](installation.md)
+* [Sample test code file](../testing-guide/test-sample.md)
+* [Example Ceedling projects](example-projects/index.md)
+* [Simple Ceedling project file](../overview/build-system.md#simple-sample-project-file)
+* [Ceedling at the command line](command-line.md)
+* [All your project configuration file options](../configuration/index.md)
+
+## Quick Start Steps
+
+Below is a quick overview of how to get started from Ceedling installation 
+through running build tasks. Jump down just a teeny bit to see what the Ceedling 
+command line looks like and navigate to all the documentation for the steps 
+listed immediately below.
+
+!!! warning "C toolchain requirement"
+    Ceedling requires a command line C toolchain be available in your path and is
+    flexible enough to work with most anything. By default, Ceedling is ready to 
+    work with [GCC] out of the box. On Windows, we recommend [MinGW-w64], GCC
+    built for native Windows executables, installed through [MSYS2], a Windows
+    package manager that provides it.
+
+1. [Install Ceedling](installation.md)
+1. Create a project
+    * Use Ceedling to generate an example project (see next section), or
+    * Add a Ceedling project file to the root of an existing project, or
+    * Create a project from scratch:
+        1. Create a project directory.
+        1. Add source code and optionally test code however you’d like it organized.
+        1. Create a Ceedling project file in the root of your project directory.
+1. Run Ceedling tasks (see next section) from the working directory of your project.
+
+A common build strategy is to use your target toolchain for release builds—with or 
+without Ceedling—but rely on Ceedling + GCC for test builds (more on this 
+[here][overview]).
+
+!!! tip "Ceedling VS Code extension"
+    If you are a Visual Studio Code user, you may want to install the
+    [Ceedling extension](https://marketplace.visualstudio.com/items?itemName=throw-the-switch.vscode-ceedling).
+
+[GCC]: https://gcc.gnu.org
+[MinGW-w64]: https://www.mingw-w64.org
+[MSYS2]: https://www.msys2.org
+[overview]: ../overview/index.md
+
+## Command Line & Build Tasks
+
+Once you have Ceedling installed, you always have access to `ceedling help`.
+
+Once you have Ceedling installed, you have options for project creation
+using Ceedling’s application commands:
+
+* `ceedling new <name> <destination>`
+* `ceedling examples` to list available example projects and 
+  `ceedling example <name> <destination>` to create a readymade sample 
+   project whose project file you can copy and modify.
+
+Once you have a Ceedling project file and a project directory structure for your
+code, Ceedling build tasks go like this:
+
+* `ceedling test:MyCodeModule`, or
+* `ceedling test:all`, or
+* `ceedling release`, or, if you fancy and have the GCov plugin enabled,
+* `ceedling clobber test:all gcov:all release --log --verbosity=obnoxious`
+
+<br/><br/>

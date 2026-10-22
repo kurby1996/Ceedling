@@ -1,0 +1,169 @@
+# =========================================================================
+#   Ceedling - Test-Centered Build System for C
+#   ThrowTheSwitch.org
+#   Copyright (c) 2010-26 Mike Karlesky, Mark VanderVoord, & Greg Williams
+#   SPDX-License-Identifier: MIT
+# =========================================================================
+
+require 'ceedling/constants'
+require 'ceedling/defaults'
+require 'ceedling/exceptions'
+
+class PluginReportinator
+  
+  constructor :plugin_reportinator_helper, :plugin_manager, :reportinator, :loginator, :templateinator
+
+  def setup
+    @test_results_template = nil
+  end
+  
+  def register_test_results_template(template)
+    @test_results_template = template
+  end
+
+  def set_system_objects(system_objects)
+    # Available for use inside report template rendering via binding()
+    @ceedling = system_objects
+  end
+  
+  def fetch_results(results_path, test, options={:boom => false})
+    return @plugin_reportinator_helper.fetch_results( File.join(results_path, test), options )
+  end
+
+  def generate_banner(message)
+    return @reportinator.generate_banner(message)
+  end
+
+  def generate_heading(message)
+    return @reportinator.generate_heading(message)
+  end
+
+  # Common preamble values every stdout test-results template needs before
+  # rendering -- centralized so sibling templates can't silently drift the
+  # way two of them once did over which of these values got computed at all.
+  def test_report_preamble(hash)
+    {
+      ignored:        hash[:results][:counts][:ignored],
+      failed:         hash[:results][:counts][:failed],
+      stdout_count:   hash[:results][:counts][:stdout],
+      header_prepend: (hash[:context] != TEST_SYM ? "#{hash[:context].to_s.upcase}: " : '')
+    }
+  end
+
+  # Reflows a possibly multi-line failure/ignore message so every physical
+  # line stays useful to whichever format is rendering it -- one template
+  # passes plain spaces to align continuation lines under a text header;
+  # another passes a repeated "file:line:test: " prefix so every line
+  # remains its own clickable reference.
+  def reflow_message(message, continuation_prefix)
+    message.each_line(chomp: true).with_index.map { |line, i| i.zero? ? line : continuation_prefix + line }.join("\n")
+  end
+
+  # Color-decorates summary-banner text green/red by overall pass/fail
+  # outcome -- shared so no sibling template can silently omit this the way
+  # one once did.
+  def decorate_summary_banner(text, failed_count)
+    @loginator.decorate(text, failed_count > 0 ? LogLabels::FAIL : LogLabels::PASS)
+  end
+
+  ##
+  ## Sample Test Results Output File (YAML)
+  ## ======================================
+  ##
+  ## TestUsartModel.fail:
+  ## ---
+  ## :source:
+  ##   :file: test/TestUsartModel.c
+  ##   :dirname: test
+  ##   :basename: TestUsartModel.c
+  ## :successes:
+  ## - :test: testGetBaudRateRegisterSettingShouldReturnAppropriateBaudRateRegisterSetting
+  ##   :line: 24
+  ##   :message: ''
+  ##   :unity_test_time: 0
+  ## - :test: testGetFormattedTemperatureFormatsTemperatureFromCalculatorAppropriately
+  ##   :line: 49
+  ##   :message: ''
+  ##   :unity_test_time: 0
+  ## - :test: testShouldReturnErrorMessageUponInvalidTemperatureValue
+  ##   :line: 55
+  ##   :message: ''
+  ##   :unity_test_time: 0
+  ## - :test: testShouldReturnWakeupMessage
+  ##   :line: 61
+  ##   :message: ''
+  ##   :unity_test_time: 0
+  ## :failures:
+  ## - :test: testFail
+  ##   :line: 39
+  ##   :message: Expected 2 Was 3
+  ##   :unity_test_time: 0
+  ## :ignores:
+  ## - :test: testIgnore
+  ##   :line: 34
+  ##   :message: ''
+  ##   :unity_test_time: 0
+  ## :counts:
+  ##   :total: 6
+  ##   :passed: 4
+  ##   :failed: 1
+  ##   :ignored: 1
+  ## :stdout: []
+  ## :time: 0.006512000225484371
+
+  def assemble_test_results(results_list, options={:boom => false})
+    aggregated_results = new_results()
+
+    results_list.each do |result_path| 
+      results = @plugin_reportinator_helper.fetch_results( result_path, options )
+      @plugin_reportinator_helper.process_results(aggregated_results, results)
+    end
+
+    return aggregated_results
+  end
+      
+  # A build's own test results -- pass or fail -- are core information a user
+  # silencing routine build chatter still wants to see; ERRORS is the floor
+  # for both, not just for a failing run. Centralized here so every plugin
+  # printing post-build test results (report_tests_stdout_plugin, gcov,
+  # bullseye, valgrind) agrees on the same answer instead of each hardcoding
+  # its own.
+  def test_results_floor_verbosity
+    Verbosity::ERRORS
+  end
+
+  def run_test_results_report(hash, verbosity=Verbosity::NORMAL)
+    if @test_results_template.nil?
+      raise CeedlingException.new( "No test results report template has been set." )
+    end
+
+    run_report( @test_results_template, hash, verbosity )
+  end
+  
+  def run_report(template, hash=nil, verbosity=Verbosity::NORMAL)
+    # binding() is what exposes `hash` and this object's own methods to the template
+    output = @templateinator.render( template, binding() )
+
+    # Log the rendered report with no log level heading
+    @loginator.log( output, verbosity, LogLabels::NONE )
+  end
+  
+  #
+  # Private
+  #
+
+  private
+  
+  def new_results()
+    return {
+      :times       => {},
+      :successes   => [],
+      :failures    => [],
+      :ignores     => [],
+      :stdout      => [],
+      :counts      => {:total => 0, :passed => 0, :failed => 0, :ignored  => 0, :stdout => 0},
+      :total_time  => 0.0
+      }
+  end
+ 
+end

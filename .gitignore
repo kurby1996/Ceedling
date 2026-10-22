@@ -1,0 +1,52 @@
+.*.swp
+.swp
+
+tags
+*.taghl
+
+build/
+examples/temp_sensor/vendor/
+examples/temp_sensor/build/
+plugins/fff/examples/fff_example/build/
+plugins/module_generator/example/build/
+plugins/dependencies/example/boss/build/
+plugins/dependencies/example/boss/third_party/
+plugins/dependencies/example/supervisor/build/
+
+# Logs / test output
+specout/
+systests/
+
+# Coverage report output (CEEDLING_TEST_COVERAGE test runs)
+/coverage/
+
+# Profiling reports/artifacts (rake profile:* tasks)
+/tmp/
+
+# Generated documentation site builds
+site-web/
+site-local/
+.docsenv/
+
+# IDEs and related
+ceedling.sublime-project
+ceedling.sublime-workspace
+/.idea
+/.vscode
+/.claude
+
+# Generated commit hash file for `--version` output
+/GIT_COMMIT_SHA
+
+# macOS junk
+.DS_Store
+
+# Ruby and Gem related
+.ruby-version
+ceedling-*.gem
+Gemfile.lock
+
+# Generated SBOMs -- attached to releases, never committed. The gemspec also rejects
+# these so a local `rake sbom:build` cannot leak one into a gem built afterward.
+ceedling-*.cdx.json
+ceedling-*.spdx.json

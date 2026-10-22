@@ -1,0 +1,32 @@
+# =========================================================================
+#   Ceedling - Test-Centered Build System for C
+#   ThrowTheSwitch.org
+#   Copyright (c) 2010-26 Mike Karlesky, Mark VanderVoord, & Greg Williams
+#   SPDX-License-Identifier: MIT
+# =========================================================================
+
+CPPCHECK_ROOT_NAME           = 'cppcheck'.freeze
+CPPCHECK_TASK_ROOT           = CPPCHECK_ROOT_NAME + ':'
+CPPCHECK_SYM                 = CPPCHECK_ROOT_NAME.to_sym
+CPPCHECK_HTMLREPORT_SYM      = (CPPCHECK_ROOT_NAME + '_htmlreport').to_sym
+
+CPPCHECK_BUILD_PATH          = File.join(PROJECT_BUILD_ROOT, CPPCHECK_ROOT_NAME)
+CPPCHECK_ARTIFACTS_PATH      = File.join(PROJECT_BUILD_ARTIFACTS_ROOT, CPPCHECK_ROOT_NAME)
+CPPCHECK_ARTIFACTS_HTML_PATH = File.join(CPPCHECK_ARTIFACTS_PATH, 'html')
+
+# Severity values Cppcheck tags each <error> element with. Used to validate
+# :fail_build_severities so an unrecognized value is rejected rather than silently
+# never matching a finding.
+CPPCHECK_SEVERITIES = [
+  'error',
+  'warning',
+  'style',
+  'performance',
+  'portability',
+  'information'
+].freeze
+
+CPPCHECK_ARTIFACTS_BASENAME   = 'CppcheckReport'.freeze
+CPPCHECK_ARTIFACTS_FILE_SARIF = CPPCHECK_ARTIFACTS_BASENAME.ext('.sarif').freeze
+CPPCHECK_ARTIFACTS_FILE_TEXT  = CPPCHECK_ARTIFACTS_BASENAME.ext('.txt').freeze
+CPPCHECK_ARTIFACTS_FILE_XML   = CPPCHECK_ARTIFACTS_BASENAME.ext('.xml').freeze

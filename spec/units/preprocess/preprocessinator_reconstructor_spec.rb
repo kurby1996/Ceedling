@@ -1,0 +1,978 @@
+# =========================================================================
+#   Ceedling - Test-Centered Build System for C
+#   ThrowTheSwitch.org
+#   Copyright (c) 2010-26 Mike Karlesky, Mark VanderVoord, & Greg Williams
+#   SPDX-License-Identifier: MIT
+# =========================================================================
+
+require 'spec_helper'
+require 'ceedling/preprocess/preprocessinator_reconstructor'
+require 'ceedling/parsing_parcels'
+
+describe PreprocessinatorReconstructor do
+  before(:each) do
+    @parsing_parcels = ParsingParcels.new()
+    @file_wrapper    = double( "FileWrapper" )
+    @extractor = described_class.new(
+      {
+        :parsing_parcels => @parsing_parcels,
+        :file_wrapper    => @file_wrapper,
+      }
+    )
+  end
+
+  context "#extract_file_as_array_from_expansion" do
+    it "should simply extract text of original file from preprocessed expansion" do
+      filepath = "path/do/WANT.c"
+      
+      file_contents = [
+        '# 1 "some/file/we/do/not/care/about.c" 5',
+        'some_text_we_do_not_want();',
+        '# 11 "path/do/WANT.c" 99999',               # Beginning of block to extract
+        'some_text_we_do_want();',                   #  Line to extract
+        '',                                          #  Blank line to extract
+        'some_awesome_text_we_want_so_hard();',      #  Line to extract
+        'holy_crepes_more_awesome_text();',          #  Line to extract
+        '# 3 "some/other/file/we/ignore.c" 5',       # End of block to extract
+      ]
+
+      expected = [
+        'some_text_we_do_want();',
+        '',
+        'some_awesome_text_we_want_so_hard();',
+        'holy_crepes_more_awesome_text();'
+      ]
+
+      input = StringIO.new( file_contents.join( "\n" ) )
+
+      expect( @extractor.extract_file_as_array_from_expansion( input, filepath ) ).to eq expected
+    end
+
+    it "should extract text of original file from preprocessed expansion preserving #directives and cleaning up whitespace)" do
+      filepath = "this/path/MY_FILE.C"
+      
+      file_contents = [
+        '# 1 "./this/path/MY_FILE.C" 99999',         # Beginning of block to extract
+        '       ',                                   #  Whitespace collapse & preserve as blank line
+        '#pragma yo sup',                            #  Line to extract -- #pragma is not end-of-block preprocessor line marker
+        '#define FOO(...)',                          #  Line to extract -- #define is not end-of-block preprocessor line marker
+        'void some_function(void) {',                #  Line to extract
+        '  do_something();   ',                      #  Line to extract with leading whitespace that should remain
+        '  }',                                       #  Line to extract with leading whitespace that should remain
+        "\t",                                        #  Whitespace collapse & preserve as blank line
+        '# 1 "some/useless/file.c"'                  # End of block to extract
+      ]
+
+      expected = [
+        '#pragma yo sup',
+        '#define FOO(...)',
+        'void some_function(void) {',
+        '  do_something();',         
+        '  }',                         
+        ''
+      ]
+
+      input = StringIO.new( file_contents.join( "\n" ) )
+
+      expect( @extractor.extract_file_as_array_from_expansion( input, filepath ) ).to eq expected
+    end
+
+    it "should preserve a run of multiple consecutive blank lines rather than collapsing to one" do
+      filepath = "this/path/MY_FILE.C"
+
+      file_contents = [
+        '# 1 "./this/path/MY_FILE.C" 99999',
+        'void some_function(void) {',
+        '',
+        '',
+        '',
+        '  return 0;',
+        '}'
+      ]
+
+      # All three blank lines must survive -- e.g. a stripped multi-line comment
+      # or literal blank lines in the source, either way nothing gets dropped.
+      expected = [
+        'void some_function(void) {',
+        '',
+        '',
+        '',
+        '  return 0;',
+        '}'
+      ]
+
+      input = StringIO.new( file_contents.join( "\n" ) )
+
+      expect( @extractor.extract_file_as_array_from_expansion( input, filepath ) ).to eq expected
+    end
+
+    it "should preserve independent runs of differing blank-line counts between separate code lines" do
+      filepath = "path/multi.c"
+
+      file_contents = [
+        '# 1 "path/multi.c" 1',
+        'int a;',
+        '',
+        '',
+        'int b;',
+        '',
+        'int c;',
+        '',
+        '',
+        '',
+        'int d;'
+      ]
+
+      # Each run's count must stay attached to its own gap -- not merged with a
+      # neighboring run, not truncated to a shared count.
+      expected = [
+        'int a;',
+        '',
+        '',
+        'int b;',
+        '',
+        'int c;',
+        '',
+        '',
+        '',
+        'int d;'
+      ]
+
+      input = StringIO.new( file_contents.join( "\n" ) )
+
+      expect( @extractor.extract_file_as_array_from_expansion( input, filepath ) ).to eq expected
+    end
+
+    it "should preserve a following blank-line run after a marker-continuation (dangling semicolon) fragment" do
+      filepath = "sys/types_wrapper.c"
+
+      file_contents = [
+        '# 1 "sys/types_wrapper.c" 1',
+        'typedef unsigned long uint32_t',    # System typedef expansion, unterminated
+        '# 1 "sys/types_wrapper.c" 2',       # GCC re-marks the SAME source line...
+        ';',                                  # ...to attach a dangling ';' as a continuation, not a new line
+        '',
+        '',
+        'void some_function(void) {',
+        '  return;',
+        '}',
+        '# 1 "some/useless/file.c"'
+      ]
+
+      # The typedef and its dangling ';' must aggregate onto a single output
+      # line (existing behavior), and the two blank lines that follow -- e.g.
+      # from a stripped comment after the typedef -- must both still survive.
+      expected = [
+        'typedef unsigned long uint32_t;',
+        '',
+        '',
+        'void some_function(void) {',
+        '  return;',
+        '}'
+      ]
+
+      input = StringIO.new( file_contents.join( "\n" ) )
+
+      expect( @extractor.extract_file_as_array_from_expansion( input, filepath ) ).to eq expected
+    end
+
+    it "should extract text of original file from preprocessed expansion with complex preprocessor line marker sequence" do
+      filepath = "dir/our_file.c"
+      
+      file_contents = [
+        '# 1 "dir/our_file.c" 123',                  # Beginning of file / block to extract
+        'some_text_we_do_want();',                   #  Line to extract
+        'some_awesome_text_we_want_so_hard();',      #  Line to extract
+        '# 3 "some preprocessor directive"',         # End of block to extract (a directive that is a faux preprocessor line marker)
+        '',
+        'some_text_we_do_not_want();',
+        '# 15 "dir/our_file.c" 9',                   # Beginning of block to extract
+        'more_text_we_want();',                      #  Line to extract
+        'void some_function(void) { func(); }',      #  Line to extract
+        '# 9 "dir/our_file.c" 77',                   # Continuation of block to extract
+        'some code',                                 #  Line to extract
+        'test statements',                           #  Line to extract
+        '# 6 "dir/our_file.c" 19',                   # Continuation of block to extract
+        'some_additional_awesomely_wanted_text();'   #  Line to extract
+      ]                                              # End of file / end of block to extract
+
+      expected = [
+        'some_text_we_do_want();',
+        'some_awesome_text_we_want_so_hard();',
+        'more_text_we_want();',
+        'void some_function(void) { func(); }',
+        'some code',      
+        'test statements',
+        'some_additional_awesomely_wanted_text();'
+      ]
+
+      input = StringIO.new( file_contents.join( "\n" ) )
+
+      expect( @extractor.extract_file_as_array_from_expansion(input, filepath) ).to eq expected
+    end
+  
+    # #1268: GCC's -fdirectives-only output preserves the ORIGINAL indentation of a
+    # top-level #include when it replaces that directive with a line marker entering
+    # the included file -- e.g. a source line "    #include \"Module3.h\"" produces
+    # "    # 1 \"Module3.h\" 1", not the flush-left "# 1 ..." this method's marker
+    # regexes assumed every marker would be. An unrecognized entering-marker leaves
+    # `extract` stuck at whatever it already was instead of turning off, so the
+    # marker line itself (and everything up to the NEXT recognized marker, e.g. one
+    # from a nested system include triggered from inside the ignored file) leaks into
+    # the extracted output before the ping-pong finally self-corrects.
+    it "does not leak file content when the marker entering an included file is itself indented" do
+      filepath = "dir/our_file.c"
+
+      file_contents = [
+        '# 1 "dir/our_file.c"',
+        'void wanted_before(void);',
+        '    # 1 "dir/included.h" 1',        # indented entering-marker (leading whitespace from source)
+        'int leaked_from_included_h;',
+        '# 1 "/usr/include/nested.h" 1 3 4',  # a normal, flush-left marker from within included.h
+        'int also_should_not_leak;',
+        '# 2 "dir/included.h" 2',             # returning from nested.h back into included.h (still not our file)
+        'int still_should_not_leak;',
+        '# 3 "dir/our_file.c" 2',             # returning to our file
+        'void wanted_after(void);',
+      ]
+
+      expected = [
+        'void wanted_before(void);',
+        'void wanted_after(void);',
+      ]
+
+      input = StringIO.new( file_contents.join( "\n" ) )
+
+      expect( @extractor.extract_file_as_array_from_expansion( input, filepath ) ).to eq expected
+    end
+
+    it "should extract text of original file from preprocessed expansion ignoring embedded expansions having similar names" do
+      filepath = "dir1/dir2/our_file.c"
+      
+      file_contents = [
+        '# 1 "dir1/dir2/our_file.c" 123',            # Beginning of file / block to extract
+        'some_text_we_do_want();',                   #  Line to extract
+        'some_awesome_text_we_want_so_hard();',      #  Line to extract
+        '# 987 "some preprocessor directive"',       # End of block to extract (a directive that is a faux preprocessor line marker)
+        '',
+        'some_text_we_do_not_want();',
+        '# 15 "dir1/dir2/not_our_file.c" 9',         # Beginning of block we should ignore despite similar filename
+        'more_text_we_want();',                      #  Line to ignore
+        'void some_function(void) { func(); }',      #  Line to ignore
+        '# 9 "dir1/dir2/not_our_file.c" 77',         # Continuation of block to ignore
+        'some code',                                 #  Line to ignore
+        'test statements',                           #  Line to ignore
+        '# 6 "dir1/dir2/not_our_file.c" 19',         # Continuation of block to ignore
+        'some_additional_unwanted_text();',          #  Line to ignore
+        '',
+        'some_more_text_we_do_not_want();',
+        '# 11 "dir11/dir2/our_file.c" 9',            # Beginning of block we should ignore despite similar filepath
+        'more_text_we_want();',                      #  Line to ignore
+        'void some_function(void) { func(); }',      #  Line to ignore
+        '# 9 "dir11/dir2/our_file.c" 2 3',           # Continuation of block to ignore
+        'some code',                                 #  Line to ignore
+        'test statements',                           #  Line to ignore
+        '# 6 "dir11/dir2/our_file.c" 1',             # Continuation of block to ignore
+        'some_further_unwanted_text();',             #  Line to ignore
+        '',
+        'even_more_text_we_do_not_want();',
+        '# 11 "dir2/our_file.c" 9',                  # Beginning of block we should ignore despite similar sub-filepath
+        'more_text_we_want();',                      #  Line to ignore
+        'void some_function(void) { func(); }',      #  Line to ignore
+        '# 9 "dir2/our_file.c" 2 3',                 # Continuation of block to ignore
+        'some code',                                 #  Line to ignore
+        'test statements',                           #  Line to ignore
+        '# 6 "dir2/our_file.c" 1',                   # Continuation of block to ignore
+        'some_further_unwanted_text();'              #  Line to ignore
+      ]                                              # End of file / end of block to extract
+
+      expected = [
+        'some_text_we_do_want();',
+        'some_awesome_text_we_want_so_hard();',
+      ]
+
+      input = StringIO.new( file_contents.join( "\n" ) )
+
+      expect( @extractor.extract_file_as_array_from_expansion(input, filepath) ).to eq expected
+    end
+
+    # GH #1352: the marker returning from a header's own include must not make the next
+    # source line read as a continuation of the line before it
+    it "keeps source lines apart whose numbers match a line of an included header" do
+      filepath = "path/a.c"
+
+      file_contents = [
+        '# 1 "path/a.c"',
+        '# 1 "path/a.h" 1',
+        '',
+        '',
+        '# 1 "/usr/include/stdint.h" 1 3 4',
+        'typedef unsigned int uint32_t;',
+        '# 4 "path/a.h" 2',
+        'uint32_t a_sum(void);',
+        '# 2 "path/a.c" 2',
+        '#define A_FIRST (1U)',
+        '#define A_SECOND (2U)',
+      ]
+
+      expected = [
+        '#define A_FIRST (1U)',
+        '#define A_SECOND (2U)',
+      ]
+
+      input = StringIO.new( file_contents.join( "\n" ) )
+
+      expect( @extractor.extract_file_as_array_from_expansion( input, filepath ) ).to eq expected
+    end
+
+    it "should extract text of original file from staggered system include expansions" do
+      filepath = "path/system_header_expansion.c"
+      
+      file_contents = [
+        '# 9 "path/system_header_expansion.c" 2',
+        '',
+        '',
+        'uint16_t var1;',
+        '',
+        'static ',
+        '# 13 "path/system_header_expansion.c" 3 4',
+        '      _Bool ',
+        '# 13 "path/system_header_expansion.c"',
+        '           var1;',
+        '',
+        'static ',
+        '# 15 "path/system_header_expansion.c" 3 4',
+        '      _Bool ',
+        '# 15 "path/system_header_expansion.c"',
+        '           ecs_foo__init_structure(void);',
+        '',
+        '',
+        '',
+        'void ecs_foo_init(void) {',
+        '    var1 = ecs_foo__init_structure();',
+        '}',
+        '',
+        'static ',
+        '# 23 "path/system_header_expansion.c" 3 4',
+        '      _Bool ',
+        '# 23 "path/system_header_expansion.c"',
+        '           ecs_foo__init_structure(void) {',
+        '    return ',
+        '# 24 "path/system_header_expansion.c" 3 4',
+        '          1',
+        '# 24 "path/system_header_expansion.c"',
+        '              ;',
+        '}',
+      ]
+
+      expected = [
+        'uint16_t var1;',
+        '',
+        'static _Bool var1;',
+        '',
+        'static _Bool ecs_foo__init_structure(void);',
+        '',
+        '',
+        '',
+        'void ecs_foo_init(void) {',
+        '    var1 = ecs_foo__init_structure();',
+        '}',
+        '',
+        'static _Bool ecs_foo__init_structure(void) {',
+        '    return 1;',
+        '}',
+      ]
+
+      input = StringIO.new( file_contents.join( "\n" ) )
+
+      expect( @extractor.extract_file_as_array_from_expansion( input, filepath ) ).to eq expected
+    end
+
+    it "cleans an incomplete (truncated) multi-byte UTF-8 sequence without raising" do
+      filepath = "path/do/WANT.c"
+
+      # \xE4\xBD is the first two of three bytes of U+4F60 (你), missing its
+      # final continuation byte -- a "half" Unicode character, as if clipped
+      # by a chunk boundary. Placed inside a line GCC's expansion output would
+      # itself produce (a localized diagnostic or macro-expanded string
+      # literal can contain non-ASCII bytes -- see compact_file_from_expansion's
+      # own comment on this).
+      half = [0xE4, 0xBD].pack('C*').force_encoding('BINARY')
+
+      file_contents = [
+        '# 1 "path/do/WANT.c" 1',
+        ("some_text_with_a_" + half + "_truncated_char();"),
+      ]
+
+      input = StringIO.new( file_contents.join( "\n" ).force_encoding('BINARY') )
+
+      expect {
+        @result = @extractor.extract_file_as_array_from_expansion( input, filepath )
+      }.not_to raise_error
+
+      expect( @result ).to eq( ['some_text_with_a__truncated_char();'] )
+    end
+  end
+
+  context "#extract_file_as_string_from_expansion" do
+    it "should simply extract text of original file from preprocessed expansion" do
+      filepath = "path/do/WANT.c"
+      
+      file_contents = [
+        '# 1 "some/file/we/do/not/care/about.c" 5',
+        'some_text_we_do_not_want();',
+        '# 11 "./path/do/WANT.c" 99999',             # Beginning of block to extract
+        'some_text_we_do_want();',                   #  Line to extract
+        '',                                          #  Blank line to extract
+        'some_awesome_text_we_want_so_hard();',      #  Line to extract
+        'holy_crepes_more_awesome_text();',          #  Line to extract
+        '# 3 "some/other/file/we/ignore.c" 5',       # End of block to extract
+      ]
+
+      expected = [
+        'some_text_we_do_want();',
+        '',
+        'some_awesome_text_we_want_so_hard();',
+        'holy_crepes_more_awesome_text();'
+      ].join( "\n" )
+
+      input = StringIO.new( file_contents.join( "\n" ) )
+
+      expect( @extractor.extract_file_as_string_from_expansion( input, filepath ) ).to eq expected
+    end
+  end
+
+  context "#compact_from_expansion" do
+    it "should write only lines from source filepath to output IO, excluding other included files" do
+      filepath = "path/do/WANT.c"
+
+      file_contents = [
+        '# 1 "some/file/we/do/not/care/about.c" 5',
+        'some_text_we_do_not_want();',
+        '# 11 "path/do/WANT.c" 99999',               # Beginning of block to extract
+        'some_text_we_do_want();',                   #  Line to write
+        '',                                          #  Blank line to write
+        'some_awesome_text_we_want_so_hard();',      #  Line to write
+        'holy_crepes_more_awesome_text();',          #  Line to write
+        '# 3 "some/other/file/we/ignore.c" 5',       # End of block to extract
+      ]
+
+      expected_lines = [
+        'some_text_we_do_want();',
+        '',
+        'some_awesome_text_we_want_so_hard();',
+        'holy_crepes_more_awesome_text();'
+      ]
+
+      input  = StringIO.new( file_contents.join( "\n" ) )
+      output = StringIO.new
+
+      @extractor.compact_from_expansion( input: input, filepath: filepath, output: output )
+
+      # `puts` appends "\n" to each line, so join with "\n" + trailing "\n"
+      expect( output.string ).to eq( expected_lines.join( "\n" ) + "\n" )
+    end
+
+    it "should produce empty output when source filepath has no matching line markers" do
+      filepath = "path/not/in/expansion.c"
+
+      file_contents = [
+        '# 1 "some/other/file.c" 5',
+        'text_we_do_not_want();',
+        '# 5 "another/file.c" 1',
+        'more_unwanted_text();',
+      ]
+
+      input  = StringIO.new( file_contents.join( "\n" ) )
+      output = StringIO.new
+
+      @extractor.compact_from_expansion( input: input, filepath: filepath, output: output )
+
+      expect( output.string ).to eq ''
+    end
+
+    it "should produce content matching extract_file_as_string_from_expansion (modulo trailing newline)" do
+      filepath = "dir/our_file.c"
+
+      file_contents = [
+        '# 1 "dir/our_file.c" 123',
+        'some_text_we_do_want();',
+        'some_awesome_text_we_want_so_hard();',
+        '# 3 "some preprocessor directive"',
+        '',
+        'some_text_we_do_not_want();',
+        '# 15 "dir/our_file.c" 9',
+        'more_text_we_want();',
+        'void some_function(void) { func(); }',
+        '# 9 "dir/our_file.c" 77',
+        'some code',
+        'test statements',
+        '# 6 "dir/our_file.c" 19',
+        'some_additional_awesomely_wanted_text();'
+      ]
+
+      joined = file_contents.join( "\n" )
+
+      string_result = @extractor.extract_file_as_string_from_expansion(
+        StringIO.new( joined ), filepath
+      )
+
+      output = StringIO.new
+      @extractor.compact_from_expansion(
+        input: StringIO.new( joined ),
+        filepath: filepath,
+        output: output
+      )
+
+      # compact_from_expansion uses `puts` which appends "\n" to each line;
+      # extract_file_as_string_from_expansion uses join("\n") with no trailing newline
+      expect( output.string ).to eq( string_result + "\n" )
+    end
+  end
+
+  context "#extract_test_directive_macro_calls" do
+    it "should extract any and all test directive macro calls from test file text" do
+      file_text = <<~FILE_TEXT
+        TEST_SOURCE_FILE("foo/bar/file.c")TEST_SOURCE_FILE("yo/data.c")
+
+            TEST_INCLUDE_PATH("some/inc/dir")
+        SOME_MACRO(TEST_INCLUDE_PATH("another/dir")) TEST_INCLUDE_PATH("hello/there")
+      FILE_TEXT
+
+      expected = [
+        'TEST_SOURCE_FILE("foo/bar/file.c")',
+        'TEST_SOURCE_FILE("yo/data.c")',
+        'TEST_INCLUDE_PATH("some/inc/dir")',
+        'TEST_INCLUDE_PATH("another/dir")',
+        'TEST_INCLUDE_PATH("hello/there")'
+      ]
+
+      expect( @extractor.extract_test_directive_macro_calls( file_text ) ).to eq expected
+    end
+  end
+
+  context "#extract_test_directive_macro_calls" do
+    it "should extract only uncommented calls" do
+      file_text = <<~FILE_TEXT
+        TEST_SOURCE_FILE("foo/bar/file.c")//TEST_SOURCE_FILE("yo/data.c")
+
+            TEST_INCLUDE_PATH("some/inc/dir")
+        SOME_MACRO(TEST_INCLUDE_PATH("another/dir")) TEST_INCLUDE_PATH("hello/there")
+      FILE_TEXT
+
+      expected = [
+        'TEST_SOURCE_FILE("foo/bar/file.c")',
+        'TEST_INCLUDE_PATH("some/inc/dir")',
+        'TEST_INCLUDE_PATH("another/dir")',
+        'TEST_INCLUDE_PATH("hello/there")'
+      ]
+
+      expect( @extractor.extract_test_directive_macro_calls( file_text ) ).to eq expected
+    end
+  end
+
+  context "#extract_test_case_directives" do
+    it "should pair a single directive macro with the test function on the following line" do
+      file_text = <<~FILE_TEXT
+        TEST_CASE(1, 2, 5)
+        void test_demoParamFunction(int a, int b, int c) {
+          TEST_ASSERT_GREATER_THAN_INT(a + b, c);
+        }
+      FILE_TEXT
+
+      expected = [
+        { function: 'test_demoParamFunction', directive: ['TEST_CASE(1, 2, 5)'] }
+      ]
+
+      expect( @extractor.extract_test_case_directives( file_text ) ).to eq expected
+    end
+
+    it "should pair a stack of multiple directive macros with the single function they precede" do
+      file_text = <<~FILE_TEXT
+        TEST_CASE(25)
+        TEST_CASE(125)
+        TEST_RANGE([5, 100, 5])
+        void test_should_handle_divisible_by_5(int num) {
+          TEST_ASSERT_EQUAL(0, num % 5);
+        }
+
+        TEST_MATRIX([1, 2], [3, 4])
+        void test_matrix_example(int a, int b) {
+        }
+      FILE_TEXT
+
+      expected = [
+        {
+          function: 'test_should_handle_divisible_by_5',
+          directive: ['TEST_CASE(25)', 'TEST_CASE(125)', 'TEST_RANGE([5, 100, 5])']
+        },
+        { function: 'test_matrix_example', directive: ['TEST_MATRIX([1, 2], [3, 4])'] }
+      ]
+
+      expect( @extractor.extract_test_case_directives( file_text ) ).to eq expected
+    end
+
+    it "should omit a function with no preceding directive macro from the results" do
+      file_text = <<~FILE_TEXT
+        void test_plain_function(void) {
+        }
+
+        TEST_CASE(1)
+        void test_with_case(int a) {
+        }
+      FILE_TEXT
+
+      expected = [
+        { function: 'test_with_case', directive: ['TEST_CASE(1)'] }
+      ]
+
+      expect( @extractor.extract_test_case_directives( file_text ) ).to eq expected
+    end
+
+    it "should return an empty array when no directive macros are present" do
+      file_text = <<~FILE_TEXT
+        void setUp(void) {}
+        void test_plain(void) {}
+      FILE_TEXT
+
+      expect( @extractor.extract_test_case_directives( file_text ) ).to eq []
+    end
+  end
+
+  context "#splice_test_case_directives" do
+    it "should reinsert a directive immediately ahead of its matching function line" do
+      contents = [
+        'void setUp(void)',
+        '{',
+        '}',
+        'void test_demoParamFunction(int a, int b, int c)',
+        '{',
+        '}'
+      ]
+
+      directives = [
+        { function: 'test_demoParamFunction', directive: ['TEST_CASE(1, 2, 5)'] }
+      ]
+
+      expected = [
+        'void setUp(void)',
+        '{',
+        '}',
+        'TEST_CASE(1, 2, 5)',
+        'void test_demoParamFunction(int a, int b, int c)',
+        '{',
+        '}'
+      ]
+
+      expect( @extractor.splice_test_case_directives( contents: contents, directives: directives ) ).to eq expected
+    end
+
+    it "should place each directive ahead of its own function in forward file order" do
+      contents = [
+        'void test_A(int a)',
+        '{',
+        '}',
+        'void test_B(int a, int b)',
+        '{',
+        '}'
+      ]
+
+      directives = [
+        { function: 'test_A', directive: ['TEST_CASE(1)'] },
+        { function: 'test_B', directive: ['TEST_RANGE([1, 5, 1])'] }
+      ]
+
+      expected = [
+        'TEST_CASE(1)',
+        'void test_A(int a)',
+        '{',
+        '}',
+        'TEST_RANGE([1, 5, 1])',
+        'void test_B(int a, int b)',
+        '{',
+        '}'
+      ]
+
+      expect( @extractor.splice_test_case_directives( contents: contents, directives: directives ) ).to eq expected
+    end
+
+    it "should silently skip a directive whose function is absent from contents" do
+      contents = [
+        'void setUp(void)',
+        '{',
+        '}'
+      ]
+
+      directives = [
+        { function: 'test_missing', directive: ['TEST_CASE(1)'] }
+      ]
+
+      expect {
+        @extractor.splice_test_case_directives( contents: contents, directives: directives )
+      }.not_to raise_error
+
+      expect( @extractor.splice_test_case_directives( contents: contents, directives: directives ) ).to eq contents
+    end
+  end
+
+  context "#extract_pragmas" do
+    it "should extract any and all pragmas from file text" do
+      file_text = <<~FILE_TEXT
+        SOME_MACRO("yo")
+
+          #define  PI  3.14159
+
+        #pragma pack(1)    
+
+        extern void func_sig(int, byte);
+        #define SQUARE(x) ((x) * (x))
+
+          #pragma TOOL command \\ 
+                  with_some_args  \\
+                  that wrap
+
+        #define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+        #pragma warning(disable : 4996)  
+        #pragma GCC optimize("O3")
+
+        SOME_OTHER_MACRO("more")
+      FILE_TEXT
+
+      expected = [
+        "#pragma pack(1)",
+        [
+          "#pragma TOOL command ",
+          "          with_some_args  ",
+          "          that wrap"
+        ].join,
+        "#pragma warning(disable : 4996)",
+        "#pragma GCC optimize(\"O3\")"
+      ]
+
+      expect( @extractor.extract_pragmas( file_text ) ).to eq expected
+    end
+  end
+
+  context "#extract_include_guard" do
+    it "should extract a simple include guard from among file text" do
+      file_text = <<~FILE_TEXT
+        #ifndef _HEADER_INCLUDE_GUARD_
+        #define  _HEADER_INCLUDE_GUARD_
+
+        ...
+
+        #endif // _HEADER_INCLUDE_GUARD_
+      FILE_TEXT
+
+      expect( @extractor.extract_include_guard( file_text ) ).to eq '_HEADER_INCLUDE_GUARD_'
+    end
+
+    it "should extract the first text that looks like an include guard from among file text" do
+      file_text = <<~FILE_TEXT
+
+        #ifndef HEADER_INCLUDE_GUARD
+
+         #define  HEADER_INCLUDE_GUARD
+
+        #ifndef DUMMY_INCLUDE_GUARD
+        #define DUMMY_INCLUDE_GUARD
+
+        #endif // HEADER_INCLUDE_GUARD
+      FILE_TEXT
+
+      expect( @extractor.extract_include_guard( file_text ) ).to eq 'HEADER_INCLUDE_GUARD'
+    end
+
+    it "should not extract an include guard from among file text" do
+      file_text = <<~FILE_TEXT
+        #ifndef SOME_GUARD_NAME
+        #define  OME_GUARD_NAME
+
+        #define SOME_GUARD_NAME
+
+        #endif // SOME_GUARD_NAME
+      FILE_TEXT
+
+      expect( @extractor.extract_include_guard( file_text ) ).to eq nil
+    end
+  end
+
+  context "#extract_macro_defs" do
+    it "should extract any and all macro defintions from file text" do
+
+      # Note aspects of this heredoc text block under test:
+      #  - Macros beginning indented
+      #  - Repeated whitespace characters
+      #  - Single line and multiline macro definitions
+      #  - Whitespace after continuation slashes (eliminated in extraction)
+      #  - No empty lines between macro definitions
+
+      file_text = <<~FILE_TEXT
+        SOME_MACRO("yo")
+
+          #define  PI  3.14159
+
+        #pragma GCC something
+
+        extern void func_sig(int, byte);
+        #define SQUARE(x) ((x) * (x))  
+
+        #define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+        extern void function(void);
+
+        #define MACRO(num, str) {\\  
+                    printf("%d", num);\\
+                    printf(" is");            \\ 
+                    printf(" %s number", str);\\ 
+                    printf("\\n");\\ 
+                   }  
+
+        #define LONG_STRING "This is a very long string that \\
+                              continues on the next line"
+        #define MULTILINE_MACRO do { \\ 
+              something(); \\
+              something_else(); \\ 
+            } while(0)
+
+        SOME_OTHER_MACRO("more")
+      FILE_TEXT
+
+      expected = [
+        "#define  PI  3.14159",
+        "#define SQUARE(x) ((x) * (x))",
+        "#define MAX(a, b) ((a) > (b) ? (a) : (b))",
+        [
+          "#define MACRO(num, str) {",
+          "            printf(\"%d\", num);",
+          "            printf(\" is\");            ",
+          "            printf(\" %s number\", str);",
+          "            printf(\"\\n\");",
+          "           }"
+        ].join,
+        [
+          "#define LONG_STRING \"This is a very long string that ",
+          "                      continues on the next line\""
+        ].join,
+        [
+          "#define MULTILINE_MACRO do { ",
+          "      something(); ",
+          "      something_else(); ",
+          "    } while(0)"
+        ].join
+      ]
+
+      expect( @extractor.extract_macro_defs( file_text, nil ) ).to eq expected
+    end
+
+    it "should ignore include guard among macro defintions in file text" do
+      file_text = <<~FILE_TEXT
+        #ifndef _INCLUDE_GUARD_
+        #define _INCLUDE_GUARD_
+
+        #define PI 3.14159
+
+        #define LONG_STRING "This is a very long string that \\
+                              continues on the next line"
+
+        SOME_OTHER_MACRO("more")
+      FILE_TEXT
+
+      expected = [
+        "#define PI 3.14159",
+        "#define LONG_STRING \"This is a very long string that                       continues on the next line\""
+      ]
+
+      expect( @extractor.extract_macro_defs( file_text, '_INCLUDE_GUARD_' ) ).to eq expected
+    end
+
+    # #1266: a plain substring test against the include guard rejected any macro whose
+    # name OR value merely contained the guard string, not only the guard macro itself.
+    # RTC_HOUR_SECONDS' own name contains the guard "RTC_H", and RTC_DAY_SECONDS'
+    # *value* references RTC_HOUR_SECONDS, so its captured text also contains "RTC_H" --
+    # both were silently dropped from the reconstructed header, breaking compilation.
+    it "does not reject an ordinary macro whose name or value merely contains the include guard as a substring (GH #1266)" do
+      file_text = <<~FILE_TEXT
+        #ifndef RTC_H
+        #define RTC_H
+
+        #define RTC_MINUTE_SECONDS 60u
+        #define RTC_HOUR_SECONDS (60u * RTC_MINUTE_SECONDS)
+        #define RTC_DAY_SECONDS (24u * RTC_HOUR_SECONDS)
+
+        #endif
+      FILE_TEXT
+
+      expected = [
+        "#define RTC_MINUTE_SECONDS 60u",
+        "#define RTC_HOUR_SECONDS (60u * RTC_MINUTE_SECONDS)",
+        "#define RTC_DAY_SECONDS (24u * RTC_HOUR_SECONDS)"
+      ]
+
+      expect( @extractor.extract_macro_defs( file_text, 'RTC_H' ) ).to eq expected
+    end
+
+    it "still rejects the include guard when it appears with trailing whitespace instead of a value" do
+      file_text = <<~FILE_TEXT
+        #ifndef RTC_H
+        #define RTC_H
+
+        #define RTC_MINUTE_SECONDS 60u
+      FILE_TEXT
+
+      expected = [ "#define RTC_MINUTE_SECONDS 60u" ]
+
+      expect( @extractor.extract_macro_defs( file_text, 'RTC_H' ) ).to eq expected
+    end
+
+  end
+
+  context "#compact_file_from_expansion" do
+    it "should open its input in binary mode and its output in binary mode" do
+      # Binary mode on both ends: this content is read again downstream by code
+      # that depends on its line count being exact, so nothing here should be
+      # subject to platform-specific line ending translation.
+      input_handle  = StringIO.new( '# 1 "WANT.c" 5' + "\n" + 'text_we_want();' + "\n" )
+      output_handle = StringIO.new
+
+      expect(@file_wrapper).to receive(:open_with_retry).with( 'input.c', 'rb' ).and_yield( input_handle )
+      expect(@file_wrapper).to receive(:open).with( 'output.c', 'wb' ).and_yield( output_handle )
+
+      @extractor.compact_file_from_expansion(
+        input_filepath:  'input.c',
+        source_filepath: 'WANT.c',
+        output_filepath: 'output.c'
+      )
+    end
+
+    it "should extract the same content from CRLF-terminated input as from LF-terminated input" do
+      # GCC's preprocessor output on Windows is CRLF-terminated. Extraction must
+      # produce identical results regardless of the input's line endings, since
+      # the exact line count of what's extracted matters to code downstream.
+      lf_input = StringIO.new(
+        '# 1 "WANT.c" 5' + "\n" + "line_one();\n" + "\n" + "line_two();\n"
+      )
+      crlf_input = StringIO.new(
+        '# 1 "WANT.c" 5' + "\r\n" + "line_one();\r\n" + "\r\n" + "line_two();\r\n"
+      )
+      lf_output   = StringIO.new
+      crlf_output = StringIO.new
+
+      allow(@file_wrapper).to receive(:open_with_retry).with( 'lf.c', 'rb' ).and_yield( lf_input )
+      allow(@file_wrapper).to receive(:open).with( 'lf_out.c', 'wb' ).and_yield( lf_output )
+      allow(@file_wrapper).to receive(:open_with_retry).with( 'crlf.c', 'rb' ).and_yield( crlf_input )
+      allow(@file_wrapper).to receive(:open).with( 'crlf_out.c', 'wb' ).and_yield( crlf_output )
+
+      @extractor.compact_file_from_expansion(
+        input_filepath: 'lf.c', source_filepath: 'WANT.c', output_filepath: 'lf_out.c'
+      )
+      @extractor.compact_file_from_expansion(
+        input_filepath: 'crlf.c', source_filepath: 'WANT.c', output_filepath: 'crlf_out.c'
+      )
+
+      expect( crlf_output.string ).to eq( lf_output.string )
+    end
+  end
+
+end
